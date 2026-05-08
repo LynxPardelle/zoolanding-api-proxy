@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+venv/
+env/
+.aws-sam/
+.sam/
+*.zip
+secrets*.json
+local.secrets.json
+.env
+.env.*
+!.env.example
