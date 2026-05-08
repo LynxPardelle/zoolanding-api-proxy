@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -42,6 +43,36 @@ def _configured_cors_origins() -> list[str]:
     return [origin.strip() for origin in configured.split(",") if origin.strip()]
 
 
+def origin_hostname(origin: Optional[str]) -> str:
+    parsed = urllib.parse.urlparse(str(origin or "").strip())
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    return normalize_domain(parsed.hostname or "")
+
+
+def is_local_cors_origin(origin: Optional[str]) -> bool:
+    normalized_lower = str(origin or "").strip().lower()
+    return normalized_lower.startswith(("http://localhost:", "http://127.0.0.1:", "http://[::1]:"))
+
+
+def is_managed_site_origin(origin: Optional[str]) -> bool:
+    normalized = str(origin or "").strip()
+    parsed = urllib.parse.urlparse(normalized)
+    if parsed.scheme != "https":
+        return False
+
+    hostname = origin_hostname(normalized)
+    if not hostname:
+        return False
+
+    try:
+        metadata = load_item(os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry"), site_pk(hostname))
+    except Exception as exc:
+        log("WARNING", "Unable to resolve managed CORS origin", origin=hostname, errorType=type(exc).__name__)
+        return False
+    return isinstance(metadata, dict)
+
+
 def set_request_cors_origin(origin: Optional[str]) -> None:
     global _REQUEST_CORS_ORIGIN
     _REQUEST_CORS_ORIGIN = origin
@@ -57,8 +88,10 @@ def resolve_cors_origin(origin: Optional[str]) -> str:
     if normalized in configured:
         return normalized
 
-    normalized_lower = normalized.lower()
-    if normalized_lower.startswith(("http://localhost:", "http://127.0.0.1:", "http://[::1]:")):
+    if is_local_cors_origin(normalized):
+        return normalized
+
+    if is_managed_site_origin(normalized):
         return normalized
 
     return fallback

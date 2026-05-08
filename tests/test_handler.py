@@ -15,6 +15,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import lambda_function as lf
+import zoolanding_lambda_common as common
 
 
 class Ctx:
@@ -130,6 +131,39 @@ class TestApiProxyHandler(unittest.TestCase):
         self.assertEqual(len(self.fetch_calls), 1)
         self.assertEqual(self.fetch_calls[0]["method"], "GET")
         self.assertEqual(self.fetch_calls[0]["query"], {"limit": 2, "offset": 0})
+
+    def test_read_source_reflects_managed_site_origin(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "pageId": "default",
+            "sourceId": "pokemon-list",
+            "input": {"limit": 2},
+        })
+        event["headers"] = {"Origin": "https://music.lynxpardelle.com"}
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch), \
+                patch.object(common, "load_item", return_value={"published": {"versionId": "v1"}}), \
+                patch.dict(os.environ, {"ALLOWED_CORS_ORIGINS": "https://zoolandingpage.com.mx,https://test.zoolandingpage.com.mx"}):
+            response = lf.lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(response["headers"]["Access-Control-Allow-Origin"], "https://music.lynxpardelle.com")
+
+    def test_public_origin_cannot_request_another_domain(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "zoolandingpage.com.mx",
+            "sourceId": "pokemon-list",
+            "input": {"limit": 2},
+        })
+        event["headers"] = {"Origin": "https://music.lynxpardelle.com"}
+
+        response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(payload["error"], "Origin is not allowed for requested domain")
+        self.assertEqual(self.fetch_calls, [])
 
     def test_unknown_source_rejected_without_upstream_call(self):
         event = api_event("/api-proxy/read", {
@@ -275,6 +309,18 @@ class TestApiProxyHandler(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(response["headers"]["Access-Control-Allow-Origin"], "https://test.zoolandingpage.com.mx")
         self.assertEqual(response["headers"]["Vary"], "Origin")
+
+    def test_preflight_reflects_managed_site_origin(self):
+        event = api_event("/api-proxy/read", {})
+        event["httpMethod"] = "OPTIONS"
+        event["headers"] = {"Origin": "https://music.lynxpardelle.com"}
+
+        with patch.object(common, "load_item", return_value={"published": {"versionId": "v1"}}), \
+                patch.dict(os.environ, {"ALLOWED_CORS_ORIGINS": "https://zoolandingpage.com.mx,https://test.zoolandingpage.com.mx"}):
+            response = lf.lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(response["headers"]["Access-Control-Allow-Origin"], "https://music.lynxpardelle.com")
 
     def test_preflight_does_not_reflect_unlisted_public_origin(self):
         event = api_event("/api-proxy/action", {})

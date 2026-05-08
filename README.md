@@ -39,7 +39,7 @@ Do not deploy or create secrets until the frontend and policy contract are revie
 sam deploy
 ```
 
-The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy`, and the production/testing browser origins. Localhost and 127.0.0.1 origins are accepted by the Lambda for local QA only.
+The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy`, and the platform production/testing browser origins. Localhost and 127.0.0.1 origins are accepted by the Lambda for local QA only. Published draft domains are accepted dynamically from the config registry, so adding a new draft domain does not require editing the API Gateway/Lambda CORS parameter.
 
 ## Security Model
 
@@ -50,5 +50,6 @@ The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy
 - The proxy rejects HTTP methods outside `GET`, `POST`, `PUT`, `PATCH`, and `DELETE`.
 - Responses are filtered by `response.allowedFields`.
 - Upstream failures return a generic public error.
+- A public draft origin may request only its own draft domain. `test.zoolandingpage.com.mx` and local QA origins may preview other domains.
 
 See `instructions.md` for the complete contract.

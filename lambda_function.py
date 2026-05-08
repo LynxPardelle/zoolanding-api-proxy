@@ -10,6 +10,7 @@ from zoolanding_lambda_common import (
     bad_request,
     default_version_prefix,
     get_request_id,
+    is_local_cors_origin,
     join_s3_key,
     json_response,
     load_item,
@@ -18,6 +19,7 @@ from zoolanding_lambda_common import (
     normalize_domain,
     not_found,
     ok,
+    origin_hostname,
     parse_json_body,
     server_error,
     set_request_cors_origin,
@@ -65,7 +67,8 @@ class UpstreamError(ApiProxyError):
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     request_id = get_request_id(context)
-    set_request_cors_origin(_request_origin(event))
+    request_origin = _request_origin(event)
+    set_request_cors_origin(request_origin)
 
     if _is_options_request(event):
         return json_response(200, {"ok": True})
@@ -76,6 +79,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         domain = normalize_domain(str(body.get("domain") or ""))
         if not domain:
             raise ValidationError("Missing domain")
+        _enforce_origin_domain(request_origin, domain)
 
         target_id = _resolve_target_id(kind, body)
         input_payload = _normalize_input(body.get("input"))
@@ -112,6 +116,21 @@ def _is_options_request(event: Dict[str, Any]) -> bool:
         or "",
     ).upper()
     return method == "OPTIONS"
+
+
+def _enforce_origin_domain(origin: Optional[str], domain: str) -> None:
+    if not origin:
+        return
+    if is_local_cors_origin(origin):
+        return
+
+    origin_domain = origin_hostname(origin)
+    if origin_domain == "test.zoolandingpage.com.mx":
+        return
+    if origin_domain == domain:
+        return
+
+    raise ValidationError("Origin is not allowed for requested domain")
 
 
 def _resolve_proxy_kind(event: Dict[str, Any]) -> str:
