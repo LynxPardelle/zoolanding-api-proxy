@@ -351,4 +351,42 @@ def _filter_response(response_data: Dict[str, Any], integration: Dict[str, Any])
         return {}
 
     allowed = [str(field) for field in allowed_fields if str(field).strip()]
-    return {field: response_data[field] for field in allowed if field in response_data}
+    filtered: Dict[str, Any] = {}
+    for field in allowed:
+        _copy_allowed_path(response_data, filtered, [part for part in field.split(".") if part])
+    return filtered
+
+
+def _copy_allowed_path(source: Any, target: Any, parts: list[str]) -> None:
+    if not parts:
+        return
+
+    key = parts[0]
+    if isinstance(source, dict):
+        if key not in source:
+            return
+        value = source[key]
+        if len(parts) == 1:
+            if isinstance(target, dict):
+                target[key] = value
+            return
+
+        if isinstance(value, list):
+            if isinstance(target, dict):
+                existing = target.get(key)
+                if not isinstance(existing, list):
+                    existing = [{} if isinstance(item, dict) else None for item in value]
+                    target[key] = existing
+                for index, item in enumerate(value):
+                    if isinstance(item, dict) and index < len(existing):
+                        if not isinstance(existing[index], dict):
+                            existing[index] = {}
+                        _copy_allowed_path(item, existing[index], parts[1:])
+            return
+
+        if isinstance(value, dict) and isinstance(target, dict):
+            nested = target.get(key)
+            if not isinstance(nested, dict):
+                nested = {}
+                target[key] = nested
+            _copy_allowed_path(value, nested, parts[1:])

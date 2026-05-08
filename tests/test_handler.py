@@ -53,7 +53,7 @@ class TestApiProxyHandler(unittest.TestCase):
                     "method": "GET",
                     "url": "https://music.example.test/releases",
                     "allowedInputFields": ["artist"],
-                    "response": {"allowedFields": ["items"]},
+                    "response": {"allowedFields": ["items.title", "items.href"]},
                 },
             ],
             "actions": [
@@ -98,6 +98,14 @@ class TestApiProxyHandler(unittest.TestCase):
             }
         if kwargs["url"] == "https://music.example.test/rating":
             return {"status": "updated", "debug": "hidden"}
+        if kwargs["url"] == "https://music.example.test/releases":
+            return {
+                "items": [
+                    {"title": "Looking Bass", "href": "https://example.test/1", "internalId": "secret"},
+                    {"title": "Melancholy", "href": "https://example.test/2", "internalId": "secret"},
+                ],
+                "debug": "hidden",
+            }
         raise lf.UpstreamError("unexpected upstream target")
 
     def test_read_source_allows_multiple_sources_and_filters_response_fields(self):
@@ -137,6 +145,28 @@ class TestApiProxyHandler(unittest.TestCase):
         self.assertEqual(response["statusCode"], 404)
         self.assertFalse(payload["ok"])
         self.assertEqual(self.fetch_calls, [])
+
+    def test_filters_nested_array_fields(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "sourceId": "music-releases",
+            "input": {"artist": "Lynx Pardelle"},
+        })
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(payload["data"], {
+            "items": [
+                {"title": "Looking Bass", "href": "https://example.test/1"},
+                {"title": "Melancholy", "href": "https://example.test/2"},
+            ],
+        })
+        self.assertNotIn("internalId", response["body"])
+        self.assertNotIn("debug", response["body"])
 
     def test_rejects_input_fields_not_declared_by_policy(self):
         event = api_event("/api-proxy/action", {
