@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import urllib.error
@@ -253,6 +254,8 @@ def _allowed_input_fields(integration: Dict[str, Any]) -> list[str]:
 
 def _build_headers(integration: Dict[str, Any]) -> Dict[str, str]:
     headers = {"Accept": "application/json"}
+    headers.update(_static_headers(integration))
+
     auth = integration.get("auth") if isinstance(integration.get("auth"), dict) else {}
     credential_ref = str(integration.get("credentialRef") or "").strip()
     if not auth or not credential_ref:
@@ -260,21 +263,99 @@ def _build_headers(integration: Dict[str, Any]) -> Dict[str, str]:
 
     secret = _get_secret(credential_ref)
     auth_type = str(auth.get("type") or "").strip().lower()
-    secret_field = str(auth.get("secretField") or "token").strip()
-    secret_value = str(secret.get(secret_field) or "").strip()
-    if not secret_value:
-        raise ValidationError("Configured credential secret field is missing")
 
     if auth_type == "bearer":
+        secret_field = str(auth.get("secretField") or "token").strip()
+        secret_value = str(secret.get(secret_field) or "").strip()
+        if not secret_value:
+            raise ValidationError("Configured credential secret field is missing")
         headers["Authorization"] = f"Bearer {secret_value}"
     elif auth_type == "api-key-header":
+        secret_field = str(auth.get("secretField") or "token").strip()
+        secret_value = str(secret.get(secret_field) or "").strip()
+        if not secret_value:
+            raise ValidationError("Configured credential secret field is missing")
         header_name = str(auth.get("headerName") or "").strip()
         if not header_name:
             raise ValidationError("Configured API key header name is missing")
         headers[header_name] = secret_value
+    elif auth_type == "oauth2-client-credentials":
+        token_url = _validate_upstream_url(str(auth.get("tokenUrl") or ""))
+        client_id_field = str(auth.get("clientIdField") or "clientId").strip()
+        client_secret_field = str(auth.get("clientSecretField") or "clientSecret").strip()
+        client_id = str(secret.get(client_id_field) or "").strip()
+        client_secret = str(secret.get(client_secret_field) or "").strip()
+        if not client_id or not client_secret:
+            raise ValidationError("Configured OAuth client credential fields are missing")
+        token = _fetch_oauth_client_credentials_token(
+            token_url=token_url,
+            client_id=client_id,
+            client_secret=client_secret,
+            timeout_seconds=_timeout_seconds(integration),
+        )
+        headers["Authorization"] = f"Bearer {token}"
     else:
         raise ValidationError("Configured auth type is not supported")
     return headers
+
+
+def _static_headers(integration: Dict[str, Any]) -> Dict[str, str]:
+    configured = integration.get("headers")
+    if not isinstance(configured, dict):
+        return {}
+
+    headers: Dict[str, str] = {}
+    for raw_name, raw_value in configured.items():
+        name = str(raw_name or "").strip()
+        value = str(raw_value or "").strip()
+        if not name or not value:
+            continue
+        if name.lower() in {"authorization", "cookie", "set-cookie", "x-api-key"}:
+            raise ValidationError("Configured static header is not allowed")
+        headers[name] = value
+    return headers
+
+
+def _fetch_oauth_client_credentials_token(
+    *,
+    token_url: str,
+    client_id: str,
+    client_secret: str,
+    timeout_seconds: float,
+) -> str:
+    encoded_credentials = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
+    body = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode("utf-8")
+    request = urllib.request.Request(
+        token_url,
+        data=body,
+        headers={
+            "Authorization": f"Basic {encoded_credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - token URL is server policy-controlled.
+            raw = response.read(65537)
+    except urllib.error.HTTPError as exc:
+        raise UpstreamError() from exc
+    except urllib.error.URLError as exc:
+        raise UpstreamError() from exc
+
+    if len(raw) > 65536:
+        raise UpstreamError()
+
+    parsed = json.loads(raw.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise UpstreamError()
+
+    access_token = str(parsed.get("access_token") or "").strip()
+    token_type = str(parsed.get("token_type") or "Bearer").strip().lower()
+    if not access_token or token_type != "bearer":
+        raise UpstreamError()
+    return access_token
 
 
 def _get_secret(credential_ref: str) -> Dict[str, Any]:

@@ -56,6 +56,30 @@ class TestApiProxyHandler(unittest.TestCase):
                     "allowedInputFields": ["artist"],
                     "response": {"allowedFields": ["items.title", "items.href"]},
                 },
+                {
+                    "id": "tidal-albums",
+                    "method": "GET",
+                    "url": "https://openapi.tidal.com/v2/artists/10212180/relationships/albums",
+                    "credentialRef": "zoolanding/api/music/tidal",
+                    "auth": {
+                        "type": "oauth2-client-credentials",
+                        "tokenUrl": "https://auth.tidal.com/v1/oauth2/token",
+                        "clientIdField": "clientId",
+                        "clientSecretField": "clientSecret",
+                    },
+                    "headers": {
+                        "Accept": "application/vnd.tidal.v1+json",
+                    },
+                    "allowedInputFields": ["countryCode", "include"],
+                    "response": {
+                        "allowedFields": [
+                            "included.id",
+                            "included.type",
+                            "included.attributes.title",
+                            "included.attributes.releaseDate",
+                        ],
+                    },
+                },
             ],
             "actions": [
                 {
@@ -106,6 +130,22 @@ class TestApiProxyHandler(unittest.TestCase):
                     {"title": "Melancholy", "href": "https://example.test/2", "internalId": "secret"},
                 ],
                 "debug": "hidden",
+            }
+        if kwargs["url"] == "https://openapi.tidal.com/v2/artists/10212180/relationships/albums":
+            return {
+                "data": [{"id": "500", "type": "albums"}],
+                "included": [
+                    {
+                        "id": "500",
+                        "type": "albums",
+                        "attributes": {
+                            "title": "Void Techno",
+                            "releaseDate": "2018-09-07",
+                            "privateDebug": "hidden",
+                        },
+                    }
+                ],
+                "accessToken": "must-not-return",
             }
         raise lf.UpstreamError("unexpected upstream target")
 
@@ -201,6 +241,43 @@ class TestApiProxyHandler(unittest.TestCase):
         })
         self.assertNotIn("internalId", response["body"])
         self.assertNotIn("debug", response["body"])
+
+    def test_read_source_resolves_oauth_client_credentials_and_filters_tidal_response(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "sourceId": "tidal-albums",
+            "input": {"countryCode": "MX", "include": "albums"},
+        })
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf, "_get_secret", return_value={
+                    "clientId": "tidal-client-id",
+                    "clientSecret": "tidal-client-secret",
+                }), \
+                patch.object(lf, "_fetch_oauth_client_credentials_token", return_value="tidal-access-token"), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(payload["data"], {
+            "included": [
+                {
+                    "id": "500",
+                    "type": "albums",
+                    "attributes": {
+                        "title": "Void Techno",
+                        "releaseDate": "2018-09-07",
+                    },
+                },
+            ],
+        })
+        self.assertEqual(self.fetch_calls[0]["headers"]["Authorization"], "Bearer tidal-access-token")
+        self.assertEqual(self.fetch_calls[0]["headers"]["Accept"], "application/vnd.tidal.v1+json")
+        self.assertEqual(self.fetch_calls[0]["query"], {"countryCode": "MX", "include": "albums"})
+        self.assertNotIn("tidal-client-secret", response["body"])
+        self.assertNotIn("tidal-access-token", response["body"])
+        self.assertNotIn("privateDebug", response["body"])
 
     def test_rejects_input_fields_not_declared_by_policy(self):
         event = api_event("/api-proxy/action", {

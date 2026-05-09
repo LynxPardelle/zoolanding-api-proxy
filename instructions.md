@@ -67,6 +67,14 @@ Published drafts can include `server/integrations.json` in the config payload bu
 }
 ```
 
+Auth options:
+
+- `bearer`: reads `auth.secretField` from the Secrets Manager JSON object and sends `Authorization: Bearer <value>`.
+- `api-key-header`: reads `auth.secretField` and sends it in the policy-controlled `auth.headerName`.
+- `oauth2-client-credentials`: reads `auth.clientIdField` and `auth.clientSecretField` from the Secrets Manager JSON object, exchanges them at `auth.tokenUrl` with `grant_type=client_credentials`, and sends the returned bearer token upstream. The default field names are `clientId` and `clientSecret`.
+
+Static request headers may be configured with `headers` when an upstream API requires non-secret metadata such as `Accept`. Do not put credentials there; `authorization`, `cookie`, `set-cookie`, and `x-api-key` are rejected.
+
 ## Acceptance Criteria
 
 - A single draft/site can configure multiple read sources and multiple actions.

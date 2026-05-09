@@ -45,6 +45,8 @@ The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy
 
 - Secrets are stored only in AWS Secrets Manager and referenced by `credentialRef`.
 - Draft/browser payloads must not contain tokens, client secrets, private keys, or upstream URLs with embedded credentials.
+- Server-only integrations may configure safe static request headers through `headers`. Static `authorization`, `cookie`, `set-cookie`, and `x-api-key` headers are rejected so credentials keep flowing through `auth` and Secrets Manager.
+- Supported auth types are `bearer`, `api-key-header`, and `oauth2-client-credentials`. The OAuth2 client-credentials flow reads `clientId` and `clientSecret` fields from the configured secret by default, exchanges them at the policy-controlled `auth.tokenUrl`, and sends only the resulting bearer token upstream.
 - The proxy rejects unknown `sourceId` or `actionId` values.
 - The proxy rejects input fields not declared in server-only policy.
 - The proxy rejects HTTP methods outside `GET`, `POST`, `PUT`, `PATCH`, and `DELETE`.
