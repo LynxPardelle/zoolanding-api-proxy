@@ -75,6 +75,24 @@ Auth options:
 
 Static request headers may be configured with `headers` when an upstream API requires non-secret metadata such as `Accept`. Do not put credentials there; `authorization`, `cookie`, `set-cookie`, and `x-api-key` are rejected.
 
+## Creating Credential Placeholders
+
+Use `secret-placeholders/credential-placeholders.json` as the repeatable inventory of API proxy credential placeholders. It stores only safe metadata: Secrets Manager name, expected JSON field names, description, and tags.
+
+```powershell
+python .\tools\ensure_secret_placeholders.py --dry-run
+python .\tools\ensure_secret_placeholders.py --region us-east-1
+```
+
+The script is idempotent: existing secrets are left untouched so real values entered in the AWS console are not replaced. New secrets are created with placeholder JSON values such as:
+
+```json
+{
+  "clientId": "__SET_IN_AWS_CONSOLE__",
+  "clientSecret": "__SET_IN_AWS_CONSOLE__"
+}
+```
+
 ## Acceptance Criteria
 
 - A single draft/site can configure multiple read sources and multiple actions.
@@ -88,6 +106,6 @@ Static request headers may be configured with `headers` when an upstream API req
 
 ## Non-Goals
 
-- This repo does not create or rotate real upstream API secrets.
+- This repo creates only placeholder Secrets Manager entries; it does not store, generate, or rotate real upstream credential values.
 - This repo does not deploy itself automatically.
 - This repo does not expose `server/integrations.json` through runtime-read.

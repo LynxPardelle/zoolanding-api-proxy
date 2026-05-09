@@ -41,6 +41,17 @@ sam deploy
 
 The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy`, and the platform production/testing browser origins. Localhost and 127.0.0.1 origins are accepted by the Lambda for local QA only. Published draft domains are accepted dynamically from the config registry, so adding a new draft domain does not require editing the API Gateway/Lambda CORS parameter.
 
+## Credential Placeholder Workflow
+
+Credential values are not stored in this repository. To add a new API credential, add only the secret name, required JSON field names, and non-sensitive tags to `secret-placeholders/credential-placeholders.json`, then create missing placeholders:
+
+```powershell
+python .\tools\ensure_secret_placeholders.py --dry-run
+python .\tools\ensure_secret_placeholders.py --region us-east-1
+```
+
+The script creates only missing Secrets Manager entries under `zoolanding/api/` and does not overwrite existing secrets. After creation, open AWS Secrets Manager and replace the `__SET_IN_AWS_CONSOLE__` placeholders with the real values.
+
 ## Security Model
 
 - Secrets are stored only in AWS Secrets Manager and referenced by `credentialRef`.
