@@ -50,6 +50,21 @@ class TestApiProxyHandler(unittest.TestCase):
                     "response": {"allowedFields": ["results", "count"]},
                 },
                 {
+                    "id": "pokemon-detail",
+                    "method": "GET",
+                    "url": "https://pokeapi.co/api/v2/pokemon/pikachu",
+                    "allowedInputFields": [],
+                    "response": {
+                        "singleItem": True,
+                        "allowedFields": [
+                            "id",
+                            "name",
+                            "sprites.other.official-artwork.front_default",
+                            "types.type.name",
+                        ],
+                    },
+                },
+                {
                     "id": "music-releases",
                     "method": "GET",
                     "url": "https://music.example.test/releases",
@@ -115,6 +130,22 @@ class TestApiProxyHandler(unittest.TestCase):
                 "results": [{"name": "bulbasaur"}, {"name": "ivysaur"}],
                 "internalToken": "must-not-return",
             }
+        if kwargs["url"] == "https://pokeapi.co/api/v2/pokemon/pikachu":
+            return {
+                "id": 25,
+                "name": "pikachu",
+                "sprites": {
+                    "other": {
+                        "official-artwork": {
+                            "front_default": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/25.png",
+                        },
+                    },
+                },
+                "types": [
+                    {"slot": 1, "type": {"name": "electric", "url": "https://pokeapi.co/api/v2/type/13/"}},
+                ],
+                "internalToken": "must-not-return",
+            }
         if kwargs["url"] == "https://mailing.example.test/subscribe":
             return {
                 "status": "subscribed",
@@ -170,7 +201,40 @@ class TestApiProxyHandler(unittest.TestCase):
         })
         self.assertEqual(len(self.fetch_calls), 1)
         self.assertEqual(self.fetch_calls[0]["method"], "GET")
+        self.assertEqual(self.fetch_calls[0]["headers"]["User-Agent"], lf.DEFAULT_USER_AGENT)
         self.assertEqual(self.fetch_calls[0]["query"], {"limit": 2, "offset": 0})
+
+    def test_read_source_can_wrap_filtered_object_as_single_item(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "sourceId": "pokemon-detail",
+        })
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(payload["data"], {
+            "items": [
+                {
+                    "id": 25,
+                    "name": "pikachu",
+                    "sprites": {
+                        "other": {
+                            "official-artwork": {
+                                "front_default": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/25.png",
+                            },
+                        },
+                    },
+                    "types": [
+                        {"type": {"name": "electric"}},
+                    ],
+                },
+            ],
+        })
+        self.assertNotIn("internalToken", response["body"])
 
     def test_read_source_reflects_managed_site_origin(self):
         event = api_event("/api-proxy/read", {

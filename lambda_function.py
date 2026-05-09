@@ -37,6 +37,7 @@ CONFIG_TABLE_NAME = os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry")
 CONFIG_PAYLOADS_BUCKET_NAME = os.getenv("CONFIG_PAYLOADS_BUCKET_NAME", "zoolanding-config-payloads")
 DEFAULT_TIMEOUT_MS = int(os.getenv("DEFAULT_UPSTREAM_TIMEOUT_MS", "4000"))
 DEFAULT_MAX_RESPONSE_BYTES = int(os.getenv("DEFAULT_MAX_RESPONSE_BYTES", "1048576"))
+DEFAULT_USER_AGENT = os.getenv("DEFAULT_UPSTREAM_USER_AGENT", "Zoolandingpage API Proxy/1.0")
 ALLOWED_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 _SECRETS_CLIENT = None
 
@@ -253,7 +254,10 @@ def _allowed_input_fields(integration: Dict[str, Any]) -> list[str]:
 
 
 def _build_headers(integration: Dict[str, Any]) -> Dict[str, str]:
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": DEFAULT_USER_AGENT,
+    }
     headers.update(_static_headers(integration))
 
     auth = integration.get("auth") if isinstance(integration.get("auth"), dict) else {}
@@ -454,6 +458,8 @@ def _filter_response(response_data: Dict[str, Any], integration: Dict[str, Any])
     filtered: Dict[str, Any] = {}
     for field in allowed:
         _copy_allowed_path(response_data, filtered, [part for part in field.split(".") if part])
+    if response_policy.get("singleItem") is True:
+        return {"items": [filtered] if filtered else []}
     return filtered
 
 
