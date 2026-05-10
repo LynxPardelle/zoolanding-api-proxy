@@ -46,6 +46,16 @@ Published drafts can include `server/integrations.json` in the config payload bu
         "allowedFields": ["count", "results"],
         "maxBytes": 524288
       }
+    },
+    {
+      "id": "pokemon-detail",
+      "method": "GET",
+      "urlTemplate": "https://pokeapi.co/api/v2/pokemon/{pokemonName}",
+      "allowedInputFields": ["pokemonName"],
+      "response": {
+        "singleItem": true,
+        "allowedFields": ["id", "name", "sprites.other.official-artwork.front_default", "types.type.name"]
+      }
     }
   ],
   "actions": [
@@ -75,6 +85,8 @@ Auth options:
 
 Static request headers may be configured with `headers` when an upstream API requires non-secret metadata such as `Accept`. Do not put credentials there; `authorization`, `cookie`, `set-cookie`, and `x-api-key` are rejected.
 
+Parameterized upstream URLs use `urlTemplate` instead of `url`. A template can include placeholders such as `{pokemonName}` for detail pages, blog articles, product records, or similar route/query-driven resources. Every placeholder must be listed in `allowedInputFields`; missing, object, array, empty, or overlong values are rejected. Accepted values are trimmed and percent-encoded before the upstream request. Fields consumed by the URL template are not forwarded again as query/body input, while other allowlisted fields continue to be forwarded normally.
+
 ## Creating Credential Placeholders
 
 Use `secret-placeholders/credential-placeholders.json` as the repeatable inventory of API proxy credential placeholders. It stores only safe metadata: Secrets Manager name, expected JSON field names, description, and tags.
@@ -98,6 +110,7 @@ The script is idempotent: existing secrets are left untouched so real values ent
 - A single draft/site can configure multiple read sources and multiple actions.
 - The browser cannot choose arbitrary upstream URLs.
 - The browser cannot send undeclared input fields.
+- Parameterized detail sources can resolve server-owned upstream URLs from allowlisted scalar input without exposing arbitrary URL control to the browser.
 - The Lambda only resolves credentials by `credentialRef`.
 - Secret values are never returned to the browser.
 - Upstream errors are returned as generic public errors.

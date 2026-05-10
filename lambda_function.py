@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,6 +39,8 @@ CONFIG_PAYLOADS_BUCKET_NAME = os.getenv("CONFIG_PAYLOADS_BUCKET_NAME", "zoolandi
 DEFAULT_TIMEOUT_MS = int(os.getenv("DEFAULT_UPSTREAM_TIMEOUT_MS", "4000"))
 DEFAULT_MAX_RESPONSE_BYTES = int(os.getenv("DEFAULT_MAX_RESPONSE_BYTES", "1048576"))
 DEFAULT_USER_AGENT = os.getenv("DEFAULT_UPSTREAM_USER_AGENT", "Zoolandingpage API Proxy/1.0")
+MAX_TEMPLATE_INPUT_LENGTH = int(os.getenv("MAX_TEMPLATE_INPUT_LENGTH", "256"))
+URL_TEMPLATE_PLACEHOLDER_RE = re.compile(r"{([A-Za-z0-9_]+)}")
 ALLOWED_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 _SECRETS_CLIENT = None
 
@@ -206,16 +209,21 @@ def _execute_integration(integration: Dict[str, Any], input_payload: Dict[str, A
     if method not in ALLOWED_HTTP_METHODS:
         raise ValidationError(f"HTTP method {method or 'missing'} is not allowed")
 
-    url = _validate_upstream_url(str(integration.get("url") or ""))
     allowed_input = _allowed_input_fields(integration)
     unknown_fields = sorted(set(input_payload.keys()) - set(allowed_input))
     if unknown_fields:
         raise ValidationError(f"Input field '{unknown_fields[0]}' is not allowed")
 
     safe_input = {field: input_payload[field] for field in allowed_input if field in input_payload}
+    url, template_fields = _resolve_integration_url(integration, safe_input, allowed_input)
+    forwarded_input = {
+        field: value
+        for field, value in safe_input.items()
+        if field not in template_fields
+    }
     headers = _build_headers(integration)
-    query = safe_input if method == "GET" else {}
-    body = None if method == "GET" else safe_input
+    query = forwarded_input if method == "GET" else {}
+    body = None if method == "GET" else forwarded_input
     response_data = _fetch_upstream(
         method=method,
         url=url,
@@ -226,6 +234,60 @@ def _execute_integration(integration: Dict[str, Any], input_payload: Dict[str, A
         max_response_bytes=_max_response_bytes(integration),
     )
     return _filter_response(response_data, integration)
+
+
+def _resolve_integration_url(
+    integration: Dict[str, Any],
+    safe_input: Dict[str, Any],
+    allowed_input: list[str],
+) -> tuple[str, set[str]]:
+    url_template = str(integration.get("urlTemplate") or "").strip()
+    if url_template:
+        return _resolve_url_template(url_template, safe_input, allowed_input)
+
+    return _validate_upstream_url(str(integration.get("url") or "")), set()
+
+
+def _resolve_url_template(
+    url_template: str,
+    safe_input: Dict[str, Any],
+    allowed_input: list[str],
+) -> tuple[str, set[str]]:
+    placeholder_names = URL_TEMPLATE_PLACEHOLDER_RE.findall(url_template)
+    if not placeholder_names:
+        return _validate_upstream_url(url_template), set()
+
+    allowed = set(allowed_input)
+    template_fields = set()
+    resolved_url = url_template
+    for name in placeholder_names:
+        if name not in allowed:
+            raise ValidationError(f"URL template field '{name}' is not allowed")
+        if name not in safe_input:
+            raise ValidationError(f"URL template field '{name}' is missing")
+
+        encoded_value = _encode_template_value(name, safe_input[name])
+        resolved_url = resolved_url.replace(f"{{{name}}}", encoded_value)
+        template_fields.add(name)
+
+    unresolved = URL_TEMPLATE_PLACEHOLDER_RE.findall(resolved_url)
+    if unresolved:
+        raise ValidationError("URL template contains unresolved fields")
+
+    return _validate_upstream_url(resolved_url), template_fields
+
+
+def _encode_template_value(name: str, value: Any) -> str:
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        raise ValidationError(f"URL template field '{name}' must be a scalar value")
+
+    normalized = str(value).strip()
+    if not normalized:
+        raise ValidationError(f"URL template field '{name}' is required")
+    if len(normalized) > MAX_TEMPLATE_INPUT_LENGTH:
+        raise ValidationError(f"URL template field '{name}' is too long")
+
+    return urllib.parse.quote(normalized, safe="")
 
 
 def _validate_upstream_url(url: str) -> str:

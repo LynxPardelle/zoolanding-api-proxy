@@ -65,6 +65,28 @@ class TestApiProxyHandler(unittest.TestCase):
                     },
                 },
                 {
+                    "id": "pokemon-detail-template",
+                    "method": "GET",
+                    "urlTemplate": "https://pokeapi.co/api/v2/pokemon/{pokemonName}",
+                    "allowedInputFields": ["pokemonName", "locale"],
+                    "response": {
+                        "singleItem": True,
+                        "allowedFields": [
+                            "id",
+                            "name",
+                            "sprites.other.official-artwork.front_default",
+                            "types.type.name",
+                        ],
+                    },
+                },
+                {
+                    "id": "bad-template",
+                    "method": "GET",
+                    "urlTemplate": "https://pokeapi.co/api/v2/pokemon/{secretName}",
+                    "allowedInputFields": ["pokemonName"],
+                    "response": {"allowedFields": ["name"]},
+                },
+                {
                     "id": "music-releases",
                     "method": "GET",
                     "url": "https://music.example.test/releases",
@@ -143,6 +165,39 @@ class TestApiProxyHandler(unittest.TestCase):
                 },
                 "types": [
                     {"slot": 1, "type": {"name": "electric", "url": "https://pokeapi.co/api/v2/type/13/"}},
+                ],
+                "internalToken": "must-not-return",
+            }
+        if kwargs["url"] == "https://pokeapi.co/api/v2/pokemon/charizard":
+            return {
+                "id": 6,
+                "name": "charizard",
+                "sprites": {
+                    "other": {
+                        "official-artwork": {
+                            "front_default": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/6.png",
+                        },
+                    },
+                },
+                "types": [
+                    {"slot": 1, "type": {"name": "fire", "url": "https://pokeapi.co/api/v2/type/10/"}},
+                    {"slot": 2, "type": {"name": "flying", "url": "https://pokeapi.co/api/v2/type/3/"}},
+                ],
+                "internalToken": "must-not-return",
+            }
+        if kwargs["url"] == "https://pokeapi.co/api/v2/pokemon/mr%2Fmime":
+            return {
+                "id": 122,
+                "name": "mr-mime",
+                "sprites": {
+                    "other": {
+                        "official-artwork": {
+                            "front_default": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/122.png",
+                        },
+                    },
+                },
+                "types": [
+                    {"slot": 1, "type": {"name": "psychic", "url": "https://pokeapi.co/api/v2/type/14/"}},
                 ],
                 "internalToken": "must-not-return",
             }
@@ -235,6 +290,73 @@ class TestApiProxyHandler(unittest.TestCase):
             ],
         })
         self.assertNotIn("internalToken", response["body"])
+
+    def test_read_source_resolves_url_template_and_forwards_remaining_query_input(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "sourceId": "pokemon-detail-template",
+            "input": {"pokemonName": "charizard", "locale": "es"},
+        })
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(payload["data"]["items"][0]["name"], "charizard")
+        self.assertEqual(self.fetch_calls[0]["url"], "https://pokeapi.co/api/v2/pokemon/charizard")
+        self.assertEqual(self.fetch_calls[0]["query"], {"locale": "es"})
+        self.assertNotIn("pokemonName", self.fetch_calls[0]["query"])
+
+    def test_read_source_percent_encodes_url_template_values(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "sourceId": "pokemon-detail-template",
+            "input": {"pokemonName": "mr/mime"},
+        })
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(payload["data"]["items"][0]["name"], "mr-mime")
+        self.assertEqual(self.fetch_calls[0]["url"], "https://pokeapi.co/api/v2/pokemon/mr%2Fmime")
+        self.assertEqual(self.fetch_calls[0]["query"], {})
+
+    def test_rejects_url_template_placeholders_not_declared_by_policy(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "sourceId": "bad-template",
+            "input": {"pokemonName": "pikachu"},
+        })
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 400)
+        self.assertIn("not allowed", payload["error"])
+        self.assertEqual(self.fetch_calls, [])
+
+    def test_rejects_invalid_url_template_input_values(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "sourceId": "pokemon-detail-template",
+            "input": {"pokemonName": {"name": "pikachu"}},
+        })
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 400)
+        self.assertIn("must be a scalar", payload["error"])
+        self.assertEqual(self.fetch_calls, [])
 
     def test_read_source_reflects_managed_site_origin(self):
         event = api_event("/api-proxy/read", {
