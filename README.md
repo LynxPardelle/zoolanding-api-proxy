@@ -7,7 +7,7 @@ The Angular app calls:
 - `POST /api-proxy/read` for configured read data sources.
 - `POST /api-proxy/action` for configured mutable API actions.
 
-The browser sends only `domain`, optional `pageId`, `sourceId` or `actionId`, and allowlisted input values. It never sends upstream URLs or credentials. The Lambda resolves the published server-only policy from `server/integrations.json`, loads credentials by `credentialRef` from AWS Secrets Manager, calls the upstream API, filters the response, and returns safe JSON.
+The browser sends only `domain`, optional `pageId`, `sourceId` or `actionId`, and allowlisted input values. It never sends upstream URLs or credentials. The Lambda resolves the published server-only policy from `server/integrations.json`, loads credentials by `credentialRef` from SSM SecureString, calls the upstream API, filters the response, and returns safe JSON.
 
 Parameterized read sources can use server-owned `urlTemplate` values, for example `https://pokeapi.co/api/v2/pokemon/{pokemonName}`. Template placeholders must also appear in `allowedInputFields`; the Lambda trims and percent-encodes those values, uses them only to resolve the upstream URL, and keeps all undeclared fields blocked.
 
@@ -15,7 +15,7 @@ Parameterized read sources can use server-owned `urlTemplate` values, for exampl
 
 - DynamoDB table: `zoolanding-config-registry`
 - S3 bucket: `zoolanding-config-payloads`
-- AWS Secrets Manager for `credentialRef` values
+- SSM Parameter Store SecureString for `credentialRef` values
 - API Gateway: `POST /api-proxy/read` and `POST /api-proxy/action`
 
 ## Local Tests
@@ -45,20 +45,20 @@ The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy
 
 ## Credential Placeholder Workflow
 
-Credential values are not stored in this repository. To add a new API credential, add only the secret name, required JSON field names, and non-sensitive tags to `secret-placeholders/credential-placeholders.json`, then create missing placeholders:
+Credential values are not stored in this repository. New credentials should use SSM SecureString parameters under `/${credentialRef}`. To add a new API credential, add only the credential reference, required JSON field names, and non-sensitive tags to `secret-placeholders/credential-placeholders.json`, then create missing placeholders:
 
 ```powershell
 python .\tools\ensure_secret_placeholders.py --dry-run
 python .\tools\ensure_secret_placeholders.py --region us-east-1
 ```
 
-The script creates only missing Secrets Manager entries under `zoolanding/api/` and does not overwrite existing secrets. After creation, open AWS Secrets Manager and replace the `__SET_IN_AWS_CONSOLE__` placeholders with the real values.
+The legacy script creates only missing Secrets Manager entries under `zoolanding/api/` and does not overwrite existing secrets. Prefer creating a matching SSM SecureString parameter such as `/zoolanding/api/music/tidal`; after creation, replace `__SET_IN_AWS_CONSOLE__` placeholders through AWS-managed secret tooling, not in repo files.
 
 ## Security Model
 
-- Secrets are stored only in AWS Secrets Manager and referenced by `credentialRef`.
+- Credentials are stored in SSM SecureString and referenced by `credentialRef`.
 - Draft/browser payloads must not contain tokens, client secrets, private keys, or upstream URLs with embedded credentials.
-- Server-only integrations may configure safe static request headers through `headers`. Static `authorization`, `cookie`, `set-cookie`, and `x-api-key` headers are rejected so credentials keep flowing through `auth` and Secrets Manager.
+- Server-only integrations may configure safe static request headers through `headers`. Static `authorization`, `cookie`, `set-cookie`, and `x-api-key` headers are rejected so credentials keep flowing through `auth` and managed credential storage.
 - Supported auth types are `bearer`, `api-key-header`, and `oauth2-client-credentials`. The OAuth2 client-credentials flow reads `clientId` and `clientSecret` fields from the configured secret by default, exchanges them at the policy-controlled `auth.tokenUrl`, and sends only the resulting bearer token upstream.
 - The proxy rejects unknown `sourceId` or `actionId` values.
 - The proxy rejects input fields not declared in server-only policy.

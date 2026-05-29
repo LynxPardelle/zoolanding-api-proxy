@@ -43,6 +43,7 @@ MAX_TEMPLATE_INPUT_LENGTH = int(os.getenv("MAX_TEMPLATE_INPUT_LENGTH", "256"))
 URL_TEMPLATE_PLACEHOLDER_RE = re.compile(r"{([A-Za-z0-9_]+)}")
 ALLOWED_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 _SECRETS_CLIENT = None
+_SSM_CLIENT = None
 
 
 class ApiProxyError(Exception):
@@ -425,6 +426,32 @@ def _fetch_oauth_client_credentials_token(
 
 
 def _get_secret(credential_ref: str) -> Dict[str, Any]:
+    credentials = _get_ssm_parameter(credential_ref)
+    if credentials is not None:
+        return credentials
+    return _get_secrets_manager_secret(credential_ref)
+
+
+def _get_ssm_parameter(credential_ref: str) -> Optional[Dict[str, Any]]:
+    global _SSM_CLIENT
+    if not credential_ref:
+        raise ValidationError("credentialRef is missing")
+    if boto3 is None:
+        raise RuntimeError("boto3 is not available")
+    if _SSM_CLIENT is None:
+        _SSM_CLIENT = boto3.client("ssm")
+
+    parameter_name = credential_ref if credential_ref.startswith("/") else f"/{credential_ref}"
+    try:
+        response = _SSM_CLIENT.get_parameter(Name=parameter_name, WithDecryption=True)
+    except _SSM_CLIENT.exceptions.ParameterNotFound:
+        return None
+
+    raw = (response.get("Parameter") or {}).get("Value")
+    return _parse_credential_json(raw, "SSM SecureString")
+
+
+def _get_secrets_manager_secret(credential_ref: str) -> Dict[str, Any]:
     global _SECRETS_CLIENT
     if not credential_ref:
         raise ValidationError("credentialRef is missing")
@@ -435,11 +462,15 @@ def _get_secret(credential_ref: str) -> Dict[str, Any]:
 
     response = _SECRETS_CLIENT.get_secret_value(SecretId=credential_ref)
     raw = response.get("SecretString")
+    return _parse_credential_json(raw, "SecretString")
+
+
+def _parse_credential_json(raw: Any, source_label: str) -> Dict[str, Any]:
     if not raw:
-        raise ValidationError("SecretString is missing")
+        raise ValidationError(f"{source_label} is missing")
     parsed = json.loads(raw)
     if not isinstance(parsed, dict):
-        raise ValidationError("SecretString must be a JSON object")
+        raise ValidationError(f"{source_label} must be a JSON object")
     return parsed
 
 

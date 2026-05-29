@@ -22,6 +22,48 @@ class Ctx:
     aws_request_id = "proxy-tests-request"
 
 
+class FakeParameterNotFound(Exception):
+    pass
+
+
+class FakeSsmClient:
+    class exceptions:
+        ParameterNotFound = FakeParameterNotFound
+
+    def __init__(self, value=None):
+        self.value = value
+        self.calls = []
+
+    def get_parameter(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.value is None:
+            raise FakeParameterNotFound()
+        return {"Parameter": {"Value": self.value}}
+
+
+class FakeSecretsClient:
+    def __init__(self, value):
+        self.value = value
+        self.calls = []
+
+    def get_secret_value(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"SecretString": self.value}
+
+
+class FakeBoto3:
+    def __init__(self, *, ssm_client=None, secrets_client=None):
+        self.ssm_client = ssm_client
+        self.secrets_client = secrets_client
+
+    def client(self, service_name):
+        if service_name == "ssm":
+            return self.ssm_client
+        if service_name == "secretsmanager":
+            return self.secrets_client
+        raise AssertionError(f"Unexpected client: {service_name}")
+
+
 def api_event(path, body):
     return {
         "path": path,
@@ -38,6 +80,8 @@ def response_payload(response):
 
 class TestApiProxyHandler(unittest.TestCase):
     def setUp(self):
+        lf._SSM_CLIENT = None
+        lf._SECRETS_CLIENT = None
         self.fetch_calls = []
         self.policy = {
             "version": 1,
@@ -464,6 +508,37 @@ class TestApiProxyHandler(unittest.TestCase):
         self.assertNotIn("tidal-client-secret", response["body"])
         self.assertNotIn("tidal-access-token", response["body"])
         self.assertNotIn("privateDebug", response["body"])
+
+    def test_get_secret_prefers_ssm_secure_string_parameter(self):
+        ssm_client = FakeSsmClient(json.dumps({
+            "clientId": "ssm-client-id",
+            "clientSecret": "ssm-client-secret",
+        }))
+        secrets_client = FakeSecretsClient(json.dumps({
+            "clientId": "sm-client-id",
+            "clientSecret": "sm-client-secret",
+        }))
+
+        with patch.object(lf, "boto3", FakeBoto3(ssm_client=ssm_client, secrets_client=secrets_client)):
+            credentials = lf._get_secret("zoolanding/api/music/tidal")
+
+        self.assertEqual(credentials["clientId"], "ssm-client-id")
+        self.assertEqual(ssm_client.calls[0]["Name"], "/zoolanding/api/music/tidal")
+        self.assertTrue(ssm_client.calls[0]["WithDecryption"])
+        self.assertEqual(secrets_client.calls, [])
+
+    def test_get_secret_falls_back_to_secrets_manager_when_ssm_parameter_is_missing(self):
+        ssm_client = FakeSsmClient()
+        secrets_client = FakeSecretsClient(json.dumps({
+            "clientId": "sm-client-id",
+            "clientSecret": "sm-client-secret",
+        }))
+
+        with patch.object(lf, "boto3", FakeBoto3(ssm_client=ssm_client, secrets_client=secrets_client)):
+            credentials = lf._get_secret("zoolanding/api/music/tidal")
+
+        self.assertEqual(credentials["clientId"], "sm-client-id")
+        self.assertEqual(secrets_client.calls[0]["SecretId"], "zoolanding/api/music/tidal")
 
     def test_rejects_input_fields_not_declared_by_policy(self):
         event = api_event("/api-proxy/action", {
