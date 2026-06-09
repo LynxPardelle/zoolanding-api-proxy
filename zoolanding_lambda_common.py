@@ -235,7 +235,7 @@ def load_json_from_s3(bucket: str, key: str) -> Optional[Dict[str, Any]]:
         response = get_s3_client().get_object(Bucket=bucket, Key=key)
     except ClientError as exc:  # type: ignore[misc]
         code = str(getattr(exc, "response", {}).get("Error", {}).get("Code"))
-        if code in {"NoSuchKey", "404", "NotFound"}:
+        if code in {"AccessDenied", "403", "NoSuchKey", "404", "NotFound"}:
             return None
         raise
 
