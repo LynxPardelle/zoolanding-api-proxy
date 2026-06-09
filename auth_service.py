@@ -193,6 +193,7 @@ def validate_auth_registry(registry: Dict[str, Any]) -> None:
         status = _profile_status(profile)
         if status not in AUTH_PROFILE_STATUSES:
             raise AuthRegistryError("Auth profile status is invalid")
+        _validate_social_identity_provider_metadata(profile)
         if status == "active":
             if not str(profile.get("tenantId") or "").strip():
                 raise AuthRegistryError("Active auth profile requires tenantId")
@@ -810,10 +811,7 @@ def _validate_provisioning_profile(profile: Dict[str, Any]) -> None:
         if profile.get(optional_path):
             _validate_same_origin_path(str(profile.get(optional_path)), optional_path)
 
-    for provider in _social_identity_providers(profile):
-        for url_key in ("issuer", "discoveryUrl", "authorizeUrl", "tokenUrl", "userInfoUrl", "jwksUrl"):
-            if provider.get(url_key):
-                _validate_https_url(str(provider.get(url_key)), url_key)
+    _validate_social_identity_provider_metadata(profile)
 
 
 def _plan_lifecycle(status: str) -> Dict[str, Any]:
@@ -939,6 +937,13 @@ def _normalize_social_identity_provider(provider: Dict[str, Any]) -> Dict[str, A
         normalized["secretRefs"] = secret_refs
 
     return normalized
+
+
+def _validate_social_identity_provider_metadata(profile: Dict[str, Any]) -> None:
+    for provider in _social_identity_providers(profile):
+        for url_key in ("issuer", "discoveryUrl", "authorizeUrl", "tokenUrl", "userInfoUrl", "jwksUrl"):
+            if provider.get(url_key):
+                _validate_https_url(str(provider.get(url_key)), url_key)
 
 
 def _provisioning_operations(

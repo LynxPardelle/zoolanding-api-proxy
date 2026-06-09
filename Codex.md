@@ -44,7 +44,7 @@
 - Final CloudFormation status was `UPDATE_COMPLETE`. API Gateway `yxp97qlog2` now has `GET`, `POST`, and `OPTIONS` for `/auth/runtime-config`; stack output `AuthRuntimeConfigEndpoint` is `https://yxp97qlog2.execute-api.us-east-1.amazonaws.com/Prod/auth/runtime-config`.
 - CloudFront distribution `E28Y8KTE8ZVWY9` for `api.zoolandingpage.com.mx` now has `/auth/*` routed to `zoolanding-api-proxy-prod`, copied from `/api-proxy/*`, with managed caching disabled and origin request policy `Managed-AllViewerExceptHostHeader`.
 - Live smoke through both raw execute-api and `https://api.zoolandingpage.com.mx` verified: `OPTIONS /auth/runtime-config` returns `200` with matching CORS; cross-domain configured origin returns `400` with `Origin is not allowed for requested domain`; exact Zoosite domain and `zoositioweb.com` alias reach Lambda and return controlled `404 Auth profile registry not found`.
-- Zoosite currently does not have `server/auth-profile-registry.json` in the published production S3 prefix, so the expected future `enabled:false` planned-auth response is still blocked on publishing the server-only registry through the draft pipeline.
+- The earlier `404 Auth profile registry not found` evidence for Zoosite is now superseded by later live verification from the Zoosite subagent: `POST https://zoositioweb.com.mx/auth/runtime-config` with `{"domain":"zoositioweb.com.mx","authProfileId":"staff"}` returned `200`, `ok:true`, `auth.enabled:false`, `authProfileId:"staff"`. Cognito activation is still pending because the live profile remains non-active (`planned` / `enabled:false`), not because the registry is missing.
 
 ## 2026-06-09 18:06 CT - Auth Provisioning Plan Contract Hardening
 

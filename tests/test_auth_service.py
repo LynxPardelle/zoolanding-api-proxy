@@ -656,6 +656,13 @@ class TestAuthRegistryAdapter(unittest.TestCase):
         with self.assertRaises(auth.AuthRegistryError):
             auth.validate_auth_registry(registry)
 
+    def test_registry_validation_rejects_malformed_structured_social_provider_urls(self):
+        registry = active_registry()
+        registry["profiles"][1]["socialIdentityProviders"][2]["tokenUrl"] = "https://user:pass@idp.example.test/oauth2/token"
+
+        with self.assertRaisesRegex(auth.AuthRegistryError, r"tokenUrl must be an absolute https URL"):
+            auth.validate_auth_registry(registry)
+
     def test_registry_validation_requires_tenant_id_for_active_profiles(self):
         registry = active_registry()
         del registry["profiles"][0]["tenantId"]
