@@ -14,6 +14,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import lambda_function as lf
+import zoolanding_lambda_common as common
 
 
 class TestPolicyLoading(unittest.TestCase):
@@ -48,6 +49,20 @@ class TestPolicyLoading(unittest.TestCase):
                 patch.object(lf, "load_json_from_s3", return_value=None):
             with self.assertRaises(lf.NotFoundError):
                 lf._load_policy_for_domain("music.lynxpardelle.com")
+
+    def test_missing_s3_payload_access_denied_is_treated_as_not_found(self):
+        class FakeAccessDenied(Exception):
+            response = {"Error": {"Code": "AccessDenied"}}
+
+        class FakeS3Client:
+            def get_object(self, **_kwargs):
+                raise FakeAccessDenied()
+
+        with patch.object(common, "ClientError", FakeAccessDenied), \
+                patch.object(common, "get_s3_client", return_value=FakeS3Client()):
+            result = common.load_json_from_s3("zoolanding-config-payloads", "missing/server/policy.json")
+
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
