@@ -1,7 +1,9 @@
 import json
 import os
+from pathlib import Path
 import re
 import sys
+from tempfile import TemporaryDirectory
 import unittest
 import time
 from unittest.mock import patch
@@ -78,6 +80,10 @@ def active_registry():
                 "clientId": "planned-public-client-id",
                 "audiences": ["planned-public-client-id"],
                 "loginPath": "/login",
+                "logoutPath": "/logout",
+                "callbackUrls": ["https://example.test/auth/callback"],
+                "logoutUrls": ["https://example.test/logout"],
+                "allowedGroups": ["Viewers"],
             },
         ],
     }
@@ -123,11 +129,15 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
 
         body = payload(response)
         self.assertEqual(response["statusCode"], 200)
-        self.assertEqual(body["auth"], {
-            "enabled": False,
-            "authProfileId": "planned",
-            "status": "planned",
-        })
+        self.assertFalse(body["auth"]["enabled"])
+        self.assertEqual(body["auth"]["authProfileId"], "planned")
+        self.assertEqual(body["auth"]["provider"], "cognito")
+        self.assertEqual(body["auth"]["clientId"], "planned-public-client-id")
+        self.assertEqual(body["auth"]["redirectPath"], "/auth/callback")
+        self.assertEqual(body["auth"]["logoutPath"], "/logout")
+        self.assertNotIn("status", body["auth"])
+        self.assertNotIn("socialIdpSecretRefs", json.dumps(body))
+        self.assertNotIn("clientSecret", json.dumps(body))
 
     def test_runtime_config_rejects_browser_supplied_secret_or_policy_fields(self):
         event = api_event("/auth/runtime-config", {
@@ -310,6 +320,41 @@ class TestAuthServiceAuthorizer(unittest.TestCase):
 
 
 class TestAuthRegistryAdapter(unittest.TestCase):
+    def test_dry_run_local_registry_directory_resolves_stage_prefixed_runtime_config_without_secrets(self):
+        with TemporaryDirectory() as temp_dir:
+            registry_dir = Path(temp_dir) / "zoositioweb.com.mx" / "server"
+            registry_dir.mkdir(parents=True)
+            (registry_dir / "auth-profile-registry.json").write_text(
+                json.dumps(active_registry()),
+                encoding="utf-8",
+            )
+
+            event = api_event(
+                "/Prod/auth/runtime-config",
+                {"domain": "zoositioweb.com.mx", "authProfileId": "staff"},
+                headers={"Origin": "http://127.0.0.1:4202"},
+            )
+
+            with patch.dict(os.environ, {
+                "DRY_RUN": "1",
+                "LOCAL_AUTH_REGISTRY_DIR": temp_dir,
+            }), patch.object(auth, "load_item") as load_item:
+                response = lf.lambda_handler(event, Ctx())
+
+        body = payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(response["headers"]["Access-Control-Allow-Origin"], "http://127.0.0.1:4202")
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["domain"], "zoositioweb.com.mx")
+        self.assertTrue(body["auth"]["enabled"])
+        self.assertEqual(body["auth"]["authProfileId"], "staff")
+        self.assertEqual(body["auth"]["provider"], "cognito")
+        self.assertEqual(body["auth"]["clientId"], "public-client-id")
+        self.assertNotIn("socialIdpSecretRefs", json.dumps(body))
+        self.assertNotIn("clientSecret", json.dumps(body))
+        self.assertNotIn("refreshToken", json.dumps(body))
+        load_item.assert_not_called()
+
     def test_registry_adapter_loads_server_only_registry_from_published_s3_prefix(self):
         metadata = {
             "published": {

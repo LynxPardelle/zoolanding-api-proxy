@@ -11,7 +11,7 @@ The Angular app calls:
 
 The browser sends only `domain`, optional `pageId`, `sourceId` or `actionId`, and allowlisted input values. It never sends upstream URLs or credentials. The Lambda resolves the published server-only policy from `server/integrations.json`, loads credentials by `credentialRef` from SSM SecureString, calls the upstream API, filters the response, and returns safe JSON.
 
-Auth profiles are resolved from the published server-only file `server/auth-profile-registry.json`. The runtime auth endpoint accepts only `domain` and `authProfileId`, then returns the same public `runtime.auth` shape validated by the Angular app for active profiles. Planned, provisioning, suspended, and failed profiles return `enabled: false`. The provisioning endpoint is denied by default and returns only plan-only output when the caller's signed IAM role is explicitly allowlisted by `AUTH_PROVISIONING_ALLOWED_ROLE_NAMES` or `AUTH_PROVISIONING_ALLOWED_ROLE_ARNS`.
+Auth profiles are resolved from the published server-only file `server/auth-profile-registry.json`. The runtime auth endpoint accepts only `domain` and `authProfileId`, then returns the same public `runtime.auth` shape validated by the Angular app. Active profiles return `enabled: true`; planned, provisioning, suspended, and failed profiles return the same secret-free public metadata with `enabled: false`. The provisioning endpoint is denied by default and returns only plan-only output when the caller's signed IAM role is explicitly allowlisted by `AUTH_PROVISIONING_ALLOWED_ROLE_NAMES` or `AUTH_PROVISIONING_ALLOWED_ROLE_ARNS`.
 
 Parameterized read sources can use server-owned `urlTemplate` values, for example `https://pokeapi.co/api/v2/pokemon/{pokemonName}`. Template placeholders must also appear in `allowedInputFields`; the Lambda trims and percent-encodes those values, uses them only to resolve the upstream URL, and keeps all undeclared fields blocked.
 
@@ -39,6 +39,17 @@ The tests stub policy loading, upstream calls, and secrets. They do not call AWS
 $env:DRY_RUN = "1"
 python .\local_test.py
 ```
+
+For local browser QA of remote auth, run the HTTP harness with an explicit server-only registry source. `LOCAL_AUTH_REGISTRY_DIR` points at a folder containing `{domain}\server\auth-profile-registry.json`; `LOCAL_AUTH_REGISTRY_FILE` may point at a single registry file instead.
+
+```powershell
+$env:DRY_RUN = "1"
+$env:LOCAL_AUTH_REGISTRY_DIR = "C:\path\to\zoolandingpage\drafts"
+$env:ZLP_LOCAL_AUTH_PROXY_PORT = "5055"
+python .\local_auth_server.py
+```
+
+Then point the Angular dev server proxy at `http://127.0.0.1:5055`. The local auth harness dispatches through the same Lambda handler shape, including stage-prefixed paths such as `/Prod/auth/runtime-config`, and does not use `/auth/provisioning-plan` for browser QA.
 
 ## Deploy
 

@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 import re
 import urllib.parse
 from typing import Any, Dict, Optional
@@ -36,6 +37,8 @@ AUTH_PATHS = {"/auth/runtime-config", "/auth/provisioning-plan"}
 CONTROL_OR_WHITESPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 RAW_SECRET_KEY_RE = re.compile(r"(secret|token|password|private[_-]?key|credential|api[_-]?key)", re.I)
 RUNTIME_CONFIG_ALLOWED_KEYS = {"domain", "authProfileId"}
+LOCAL_AUTH_REGISTRY_FILE_ENV = "LOCAL_AUTH_REGISTRY_FILE"
+LOCAL_AUTH_REGISTRY_DIR_ENV = "LOCAL_AUTH_REGISTRY_DIR"
 ALLOWED_SECRET_REFERENCE_KEYS = {
     "credentialRef",
     "credentialRefs",
@@ -120,6 +123,11 @@ def load_auth_registry_for_domain(domain: str) -> Dict[str, Any]:
     canonical_domain = normalize_domain(domain)
     if not canonical_domain:
         raise ValueError("Missing domain")
+
+    local_registry = _load_local_auth_registry_for_domain(canonical_domain)
+    if local_registry is not None:
+        validate_auth_registry(local_registry)
+        return local_registry
 
     metadata = load_item(CONFIG_TABLE_NAME, site_pk(canonical_domain))
     if not isinstance(metadata, dict):
@@ -278,11 +286,7 @@ def _runtime_config_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     registry = load_auth_registry_for_domain(domain)
     profile = _find_profile(registry, str(payload.get("authProfileId") or registry.get("defaultAuthProfileId") or ""))
     status = _profile_status(profile)
-    profile_id = _profile_id(profile)
-    if status != "active":
-        return _auth_response(200, {"ok": True, "auth": {"enabled": False, "authProfileId": profile_id, "status": status}})
-
-    auth_payload = _public_runtime_auth(profile)
+    auth_payload = _public_runtime_auth(profile, enabled=status == "active")
     return _auth_response(200, {"ok": True, "domain": domain, "auth": auth_payload})
 
 
@@ -296,16 +300,20 @@ def _provisioning_plan_response(event: Dict[str, Any], payload: Dict[str, Any]) 
     return _auth_response(200, {"ok": True, "domain": domain, "plan": _cognito_plan(domain, profile)})
 
 
-def _public_runtime_auth(profile: Dict[str, Any]) -> Dict[str, Any]:
+def _public_runtime_auth(profile: Dict[str, Any], *, enabled: bool = True) -> Dict[str, Any]:
     issuer = str(profile.get("issuer") or "").strip()
+    audiences = _audiences(profile)
+    client_id = str(profile.get("clientId") or (audiences[0] if audiences else "")).strip()
+    if not client_id:
+        raise AuthRegistryError("Auth profile requires clientId")
     auth_payload = {
-        "enabled": True,
+        "enabled": enabled,
         "authProfileId": _profile_id(profile),
         "provider": "cognito",
         "issuer": issuer,
         "userPoolId": str(profile.get("userPoolId") or "").strip(),
         "hostedUiDomain": str(profile.get("hostedUiDomain") or "").strip(),
-        "clientId": str(profile.get("clientId") or _audiences(profile)[0]).strip(),
+        "clientId": client_id,
         "scopes": _string_list(profile.get("scopes")) or ["openid", "email", "profile"],
         "redirectPath": _runtime_path_from_profile(profile, "redirectPath", "callbackUrls", "redirectPath"),
         "logoutPath": _runtime_path_from_profile(profile, "logoutPath", "logoutUrls", "logoutPath"),
@@ -325,6 +333,59 @@ def _public_runtime_auth(profile: Dict[str, Any]) -> Dict[str, Any]:
     if not auth_payload["userPoolId"]:
         del auth_payload["userPoolId"]
     return auth_payload
+
+
+def _load_local_auth_registry_for_domain(domain: str) -> Optional[Dict[str, Any]]:
+    if not _dry_run_enabled():
+        return None
+
+    explicit_file = str(os.getenv(LOCAL_AUTH_REGISTRY_FILE_ENV, "") or "").strip()
+    if explicit_file:
+        return _read_local_registry_file(Path(explicit_file).expanduser())
+
+    configured_dir = str(os.getenv(LOCAL_AUTH_REGISTRY_DIR_ENV, "") or "").strip()
+    if not configured_dir:
+        return None
+
+    base_dir = Path(configured_dir).expanduser().resolve()
+    candidates = [
+        base_dir / domain / "server" / AUTH_REGISTRY_FILE_NAME,
+        base_dir / domain / AUTH_REGISTRY_FILE_NAME,
+        base_dir / AUTH_REGISTRY_FILE_NAME,
+    ]
+
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if not _path_is_inside(resolved, base_dir):
+            continue
+        if resolved.is_file():
+            return _read_local_registry_file(resolved)
+
+    raise AuthNotFoundError("Local auth profile registry not found")
+
+
+def _read_local_registry_file(path: Path) -> Dict[str, Any]:
+    resolved = path.resolve()
+    if not resolved.is_file():
+        raise AuthNotFoundError("Local auth profile registry not found")
+
+    with resolved.open("r", encoding="utf-8") as registry_file:
+        registry = json.load(registry_file)
+    if not isinstance(registry, dict):
+        raise AuthNotFoundError("Auth profile registry not found")
+    return registry
+
+
+def _path_is_inside(path: Path, base_dir: Path) -> bool:
+    try:
+        path.relative_to(base_dir)
+        return True
+    except ValueError:
+        return False
+
+
+def _dry_run_enabled() -> bool:
+    return str(os.getenv("DRY_RUN", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
