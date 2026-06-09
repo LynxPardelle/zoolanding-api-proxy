@@ -47,45 +47,97 @@ def payload(response):
     return json.loads(response["body"])
 
 
+def build_profile(auth_profile_id, status, **overrides):
+    profile = {
+        "authProfileId": auth_profile_id,
+        "status": status,
+        "tenantId": "tenant-a",
+        "issuer": f"https://cognito-idp.us-east-1.amazonaws.com/us-east-1_{auth_profile_id}",
+        "hostedUiDomain": f"https://{auth_profile_id}-auth.example.test",
+        "clientId": f"{auth_profile_id}-public-client-id",
+        "audiences": [f"{auth_profile_id}-public-client-id"],
+        "loginPath": "/login",
+        "logoutPath": "/logout",
+        "callbackUrls": [f"https://example.test/{auth_profile_id}/auth/callback"],
+        "logoutUrls": [f"https://example.test/{auth_profile_id}/logout"],
+        "scopes": ["openid", "email", "profile"],
+        "allowedGroups": ["Editors"],
+        "tenantClaim": "custom:tenant_id",
+        "groupClaim": "cognito:groups",
+    }
+    profile.update(overrides)
+    return profile
+
+
 def active_registry():
     return {
         "version": 1,
+        "defaultAuthProfileId": "staff",
         "profiles": [
-            {
-                "authProfileId": "staff",
-                "status": "active",
-                "tenantId": "tenant-a",
-                "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
-                "hostedUiDomain": "https://auth.example.test",
-                "clientId": "public-client-id",
-                "audiences": ["public-client-id"],
-                "loginPath": "/login",
-                "logoutPath": "/logout",
-                "callbackUrls": ["https://example.test/auth/callback"],
-                "logoutUrls": ["https://example.test/logout"],
-                "scopes": ["openid", "email", "profile"],
-                "allowedGroups": ["Editors"],
-                "tenantClaim": "custom:tenant_id",
-                "groupClaim": "cognito:groups",
-                "socialIdpSecretRefs": {
+            build_profile(
+                "staff",
+                "active",
+                issuer="https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+                hostedUiDomain="https://auth.example.test",
+                clientId="public-client-id",
+                audiences=["public-client-id"],
+                callbackUrls=["https://example.test/auth/callback"],
+                logoutUrls=["https://example.test/logout"],
+                socialIdpSecretRefs={
                     "google": "/zoolanding/auth/tenant-a/staff/google",
                     "facebook": "/zoolanding/auth/tenant-a/staff/facebook",
                 },
-            },
-            {
-                "authProfileId": "planned",
-                "status": "planned",
-                "tenantId": "tenant-a",
-                "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_planned",
-                "hostedUiDomain": "https://planned-auth.example.test",
-                "clientId": "planned-public-client-id",
-                "audiences": ["planned-public-client-id"],
-                "loginPath": "/login",
-                "logoutPath": "/logout",
-                "callbackUrls": ["https://example.test/auth/callback"],
-                "logoutUrls": ["https://example.test/logout"],
-                "allowedGroups": ["Viewers"],
-            },
+            ),
+            build_profile(
+                "planned",
+                "planned",
+                allowedGroups=["Viewers"],
+                callbackUrls=["https://example.test/auth/callback"],
+                logoutUrls=["https://example.test/logout"],
+                socialIdentityProviders=[
+                    {
+                        "providerId": "facebook",
+                        "providerType": "facebook",
+                        "clientIdRef": "/zoolanding/auth/tenant-a/planned/facebook/client-id",
+                        "clientSecretRef": "/zoolanding/auth/tenant-a/planned/facebook/client-secret",
+                    },
+                    {
+                        "providerId": "google",
+                        "providerType": "google",
+                        "clientIdRef": "/zoolanding/auth/tenant-a/planned/google/client-id",
+                        "clientSecretRef": "/zoolanding/auth/tenant-a/planned/google/client-secret",
+                        "scopes": ["openid", "email", "profile"],
+                    },
+                    {
+                        "providerId": "partner-oidc",
+                        "providerType": "oidc",
+                        "clientIdRef": "/zoolanding/auth/tenant-a/planned/oidc/client-id",
+                        "clientSecretRef": "/zoolanding/auth/tenant-a/planned/oidc/client-secret",
+                        "issuer": "https://idp.example.test",
+                        "discoveryUrl": "https://idp.example.test/.well-known/openid-configuration",
+                        "authorizeUrl": "https://idp.example.test/oauth2/authorize",
+                        "tokenUrl": "https://idp.example.test/oauth2/token",
+                        "userInfoUrl": "https://idp.example.test/userinfo",
+                        "jwksUrl": "https://idp.example.test/jwks.json",
+                        "scopes": ["openid", "email", "profile"],
+                    },
+                ],
+            ),
+            build_profile(
+                "provisioning",
+                "provisioning",
+                allowedGroups=["Operators"],
+            ),
+            build_profile(
+                "suspended",
+                "suspended",
+                allowedGroups=["Auditors"],
+            ),
+            build_profile(
+                "failed",
+                "failed",
+                allowedGroups=["Auditors"],
+            ),
         ],
     }
 
@@ -309,7 +361,100 @@ class TestAuthServiceProvisioningPlan(unittest.TestCase):
         self.assertEqual(body["error"], "Provisioning plan access denied")
         self.assertNotIn("google", json.dumps(body))
 
-    def test_trusted_server_caller_can_read_plan_with_secret_refs_but_no_raw_credentials(self):
+    def test_provisioning_plan_rejects_unsupported_request_fields(self):
+        event = api_event(
+            "/auth/provisioning-plan",
+            {
+                "domain": "example.test",
+                "authProfileId": "planned",
+                "clientSecret": "must-not-pass",
+            },
+            request_context={
+                "identity": {
+                    "userArn": "arn:aws:sts::123456789012:assumed-role/zoolanding-auth-planner/session"
+                }
+            },
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(payload(response)["error"], "Unsupported auth provisioning option")
+        self.assertNotIn("must-not-pass", response["body"])
+
+    def test_trusted_server_caller_can_read_planned_plan_with_deterministic_operations_and_secret_refs(self):
+        event = api_event(
+            "/auth/provisioning-plan",
+            {"domain": "example.test", "authProfileId": "planned"},
+            request_context={
+                "identity": {
+                    "userArn": "arn:aws:sts::123456789012:assumed-role/zoolanding-auth-planner/session"
+                }
+            },
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+            repeated_response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        repeated_body = payload(repeated_response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["plan"]["mode"], "plan-only")
+        self.assertEqual(body["plan"]["planVersion"], "2026-06-09.v1")
+        self.assertEqual(body["plan"]["provider"], "cognito")
+        self.assertEqual(body["plan"]["tenantId"], "tenant-a")
+        self.assertEqual(body["plan"]["authProfileId"], "planned")
+        self.assertFalse(body["plan"]["runtimeAuth"]["currentEnabled"])
+        self.assertEqual(body["plan"]["lifecycle"]["executorAction"], "prepare-provisioning")
+        self.assertEqual(body["plan"]["lifecycle"]["expectedFinalStatus"], "active")
+        self.assertEqual(body["plan"]["runtimeAuth"]["publicClient"]["clientId"], "planned-public-client-id")
+        self.assertEqual(
+            body["plan"]["operations"][0]["operationKey"],
+            "cognito:example.test:planned:ensure-user-pool",
+        )
+        self.assertEqual(body["plan"]["planKey"], repeated_body["plan"]["planKey"])
+        self.assertEqual(
+            body["plan"]["operations"][0]["idempotencyKey"],
+            repeated_body["plan"]["operations"][0]["idempotencyKey"],
+        )
+        providers = {item["providerId"]: item for item in body["plan"]["socialIdentityProviders"]}
+        self.assertEqual(
+            providers["google"]["secretRefs"]["clientSecret"],
+            "/zoolanding/auth/tenant-a/planned/google/client-secret",
+        )
+        self.assertEqual(providers["partner-oidc"]["providerType"], "oidc")
+        self.assertEqual(providers["partner-oidc"]["tokenUrl"], "https://idp.example.test/oauth2/token")
+        self.assertNotIn("clientSecretValue", json.dumps(body))
+        self.assertNotIn("refreshToken", json.dumps(body))
+        self.assertNotIn("must-not-pass", json.dumps(body))
+
+    def test_provisioning_status_returns_resumable_plan(self):
+        event = api_event(
+            "/auth/provisioning-plan",
+            {"domain": "example.test", "authProfileId": "provisioning"},
+            request_context={
+                "identity": {
+                    "userArn": "arn:aws:sts::123456789012:assumed-role/zoolanding-auth-planner/session"
+                }
+            },
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["plan"]["status"], "provisioning")
+        self.assertEqual(body["plan"]["lifecycle"]["executorAction"], "resume-provisioning")
+        self.assertEqual(body["plan"]["lifecycle"]["expectedFinalStatus"], "active")
+        self.assertGreater(len(body["plan"]["operations"]), 0)
+
+    def test_active_status_returns_noop_plan(self):
         event = api_event(
             "/auth/provisioning-plan",
             {"domain": "example.test", "authProfileId": "staff"},
@@ -326,12 +471,33 @@ class TestAuthServiceProvisioningPlan(unittest.TestCase):
 
         body = payload(response)
         self.assertEqual(response["statusCode"], 200)
-        self.assertEqual(body["plan"]["mode"], "plan-only")
-        self.assertEqual(body["plan"]["provider"], "cognito")
-        self.assertEqual(body["plan"]["tenantId"], "tenant-a")
-        self.assertEqual(body["plan"]["socialIdpSecretRefs"]["google"], "/zoolanding/auth/tenant-a/staff/google")
-        self.assertNotIn("clientSecretValue", json.dumps(body))
-        self.assertNotIn("refreshToken", json.dumps(body))
+        self.assertEqual(body["plan"]["status"], "active")
+        self.assertTrue(body["plan"]["runtimeAuth"]["currentEnabled"])
+        self.assertEqual(body["plan"]["lifecycle"]["executorAction"], "noop-already-active")
+        self.assertEqual(body["plan"]["operations"], [])
+
+    def test_suspended_and_failed_statuses_return_manual_review_plan(self):
+        for auth_profile_id in ("suspended", "failed"):
+            event = api_event(
+                "/auth/provisioning-plan",
+                {"domain": "example.test", "authProfileId": auth_profile_id},
+                request_context={
+                    "identity": {
+                        "userArn": "arn:aws:sts::123456789012:assumed-role/zoolanding-auth-planner/session"
+                    }
+                },
+            )
+
+            with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                    patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+                response = auth.auth_lambda_handler(event, Ctx())
+
+            body = payload(response)
+            self.assertEqual(response["statusCode"], 200)
+            self.assertEqual(body["plan"]["status"], auth_profile_id)
+            self.assertFalse(body["plan"]["runtimeAuth"]["currentEnabled"])
+            self.assertEqual(body["plan"]["lifecycle"]["executorAction"], "manual-review")
+            self.assertEqual(body["plan"]["operations"], [])
 
 
 class TestAuthServiceAuthorizer(unittest.TestCase):

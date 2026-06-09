@@ -45,3 +45,11 @@
 - CloudFront distribution `E28Y8KTE8ZVWY9` for `api.zoolandingpage.com.mx` now has `/auth/*` routed to `zoolanding-api-proxy-prod`, copied from `/api-proxy/*`, with managed caching disabled and origin request policy `Managed-AllViewerExceptHostHeader`.
 - Live smoke through both raw execute-api and `https://api.zoolandingpage.com.mx` verified: `OPTIONS /auth/runtime-config` returns `200` with matching CORS; cross-domain configured origin returns `400` with `Origin is not allowed for requested domain`; exact Zoosite domain and `zoositioweb.com` alias reach Lambda and return controlled `404 Auth profile registry not found`.
 - Zoosite currently does not have `server/auth-profile-registry.json` in the published production S3 prefix, so the expected future `enabled:false` planned-auth response is still blocked on publishing the server-only registry through the draft pipeline.
+
+## 2026-06-09 18:06 CT - Auth Provisioning Plan Contract Hardening
+
+- `/auth/provisioning-plan` remains server-only, plan-only, IAM-allowlisted, and non-mutating. No deploy, Cognito provisioning, Secrets Manager/SSM value reads, or AWS write calls are part of this contract.
+- Provisioning plan requests now accept only `domain` and `authProfileId`; extra policy/secret-style request fields are rejected instead of ignored.
+- Plan responses are now deterministic and versioned with `planVersion`, `planKey`, stable per-operation `operationKey`, and stable hashed `idempotencyKey` values so a future executor can resume safely without deriving its own keys.
+- Plans now distinguish `planned`, `provisioning`, `active`, `suspended`, and `failed` explicitly. `planned` and `provisioning` return resumable operations toward `active`; `active` returns an explicit noop contract; `suspended` and `failed` return explicit manual-review contracts with runtime auth still disabled.
+- The plan payload now carries domain, tenant, `authProfileId`, runtime public-client config, hosted UI details, expected post-activation outputs, group policy, and normalized social IdP metadata by reference only. Supported social provider normalization covers legacy `socialIdpSecretRefs` plus structured `socialIdentityProviders` entries for Google, Facebook, and OIDC-style providers without copying secret values.
