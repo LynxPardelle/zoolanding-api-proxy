@@ -6,13 +6,16 @@ import urllib.parse
 from typing import Any, Dict, Optional
 
 from zoolanding_lambda_common import (
+    alias_pk,
     default_version_prefix,
     get_request_id,
     join_s3_key,
+    is_local_cors_origin,
     load_item,
     load_json_from_s3,
     log,
     normalize_domain,
+    origin_hostname,
     resolve_cors_origin,
     set_request_cors_origin,
     site_pk,
@@ -34,9 +37,17 @@ AUTH_PROVISIONING_ALLOWED_ROLE_ARNS = os.getenv("AUTH_PROVISIONING_ALLOWED_ROLE_
 _AUTH_REQUEST_ORIGIN = None
 
 AUTH_PATHS = {"/auth/runtime-config", "/auth/provisioning-plan"}
+TEST_PREVIEW_ORIGIN_HOST = "test.zoolandingpage.com.mx"
 CONTROL_OR_WHITESPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 RAW_SECRET_KEY_RE = re.compile(r"(secret|token|password|private[_-]?key|credential|api[_-]?key)", re.I)
 RUNTIME_CONFIG_ALLOWED_KEYS = {"domain", "authProfileId"}
+ALIAS_TARGET_KEYS = (
+    "domain",
+    "canonicalDomain",
+    "targetDomain",
+    "siteDomain",
+    "resolvedDomain",
+)
 LOCAL_AUTH_REGISTRY_FILE_ENV = "LOCAL_AUTH_REGISTRY_FILE"
 LOCAL_AUTH_REGISTRY_DIR_ENV = "LOCAL_AUTH_REGISTRY_DIR"
 ALLOWED_SECRET_REFERENCE_KEYS = {
@@ -283,11 +294,94 @@ def jwt_authorizer_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any
 def _runtime_config_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     _reject_unsupported_runtime_options(payload)
     domain = normalize_domain(payload.get("domain"))
+    _enforce_runtime_origin_domain(_AUTH_REQUEST_ORIGIN, domain)
     registry = load_auth_registry_for_domain(domain)
     profile = _find_profile(registry, str(payload.get("authProfileId") or registry.get("defaultAuthProfileId") or ""))
     status = _profile_status(profile)
     auth_payload = _public_runtime_auth(profile, enabled=status == "active")
     return _auth_response(200, {"ok": True, "domain": domain, "auth": auth_payload})
+
+
+def _enforce_runtime_origin_domain(origin: Optional[str], domain: str) -> None:
+    if not domain:
+        raise ValueError("Missing domain")
+    if not origin:
+        return
+    if is_local_cors_origin(origin):
+        return
+
+    origin_domain = origin_hostname(origin)
+    if origin_domain == TEST_PREVIEW_ORIGIN_HOST:
+        return
+    if origin_domain == domain:
+        return
+    if _origin_aliases_requested_domain(origin_domain, domain):
+        return
+
+    raise ValueError("Origin is not allowed for requested domain")
+
+
+def _origin_aliases_requested_domain(origin_domain: str, requested_domain: str) -> bool:
+    origin_domain = normalize_domain(origin_domain)
+    requested_domain = normalize_domain(requested_domain)
+    if not origin_domain or not requested_domain:
+        return False
+
+    metadata = _load_site_metadata_for_origin_check(requested_domain)
+    if _metadata_lists_origin_alias(metadata, origin_domain):
+        return True
+
+    alias_metadata = _load_alias_metadata_for_origin_check(origin_domain)
+    return _alias_metadata_targets_domain(alias_metadata, requested_domain)
+
+
+def _load_site_metadata_for_origin_check(domain: str) -> Optional[Dict[str, Any]]:
+    try:
+        metadata = load_item(CONFIG_TABLE_NAME, site_pk(domain))
+    except Exception as exc:
+        log("WARNING", "Unable to resolve auth runtime origin site metadata", domain=domain, errorType=type(exc).__name__)
+        return None
+    return metadata if isinstance(metadata, dict) else None
+
+
+def _load_alias_metadata_for_origin_check(origin_domain: str) -> Optional[Dict[str, Any]]:
+    try:
+        metadata = load_item(CONFIG_TABLE_NAME, alias_pk(origin_domain), "SITE")
+    except Exception as exc:
+        log("WARNING", "Unable to resolve auth runtime origin alias metadata", originDomain=origin_domain, errorType=type(exc).__name__)
+        return None
+    return metadata if isinstance(metadata, dict) else None
+
+
+def _metadata_lists_origin_alias(metadata: Optional[Dict[str, Any]], origin_domain: str) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+
+    alias_values = _string_list(metadata.get("aliases")) + _string_list(metadata.get("domains"))
+    environments = metadata.get("environments")
+    if isinstance(environments, dict):
+        for environment in environments.values():
+            if isinstance(environment, dict):
+                alias_values.extend(_string_list(environment.get("aliases")))
+                alias_values.extend(_string_list(environment.get("domains")))
+    environment_aliases = metadata.get("environmentAliases")
+    if isinstance(environment_aliases, dict):
+        for aliases in environment_aliases.values():
+            alias_values.extend(_string_list(aliases))
+
+    return normalize_domain(origin_domain) in {normalize_domain(alias) for alias in alias_values}
+
+
+def _alias_metadata_targets_domain(metadata: Optional[Dict[str, Any]], requested_domain: str) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+
+    requested_domain = normalize_domain(requested_domain)
+    for key in ALIAS_TARGET_KEYS:
+        target = normalize_domain(metadata.get(key))
+        if target == requested_domain:
+            return True
+    return False
 
 
 def _provisioning_plan_response(event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:

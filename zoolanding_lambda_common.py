@@ -65,12 +65,21 @@ def is_managed_site_origin(origin: Optional[str]) -> bool:
     if not hostname:
         return False
 
+    table_name = os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry")
     try:
-        metadata = load_item(os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry"), site_pk(hostname))
+        metadata = load_item(table_name, site_pk(hostname))
     except Exception as exc:
         log("WARNING", "Unable to resolve managed CORS origin", origin=hostname, errorType=type(exc).__name__)
+        metadata = None
+    if isinstance(metadata, dict):
+        return True
+
+    try:
+        alias_metadata = load_item(table_name, alias_pk(hostname), "SITE")
+    except Exception as exc:
+        log("WARNING", "Unable to resolve managed CORS alias origin", origin=hostname, errorType=type(exc).__name__)
         return False
-    return isinstance(metadata, dict)
+    return isinstance(alias_metadata, dict)
 
 
 def set_request_cors_origin(origin: Optional[str]) -> None:
@@ -236,3 +245,7 @@ def load_json_from_s3(bucket: str, key: str) -> Optional[Dict[str, Any]]:
 
 def site_pk(domain: str) -> str:
     return f"SITE#{normalize_domain(domain)}"
+
+
+def alias_pk(domain: str) -> str:
+    return f"ALIAS#{normalize_domain(domain)}"

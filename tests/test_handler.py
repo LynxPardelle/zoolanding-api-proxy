@@ -827,6 +827,23 @@ class TestApiProxyHandler(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(response["headers"]["Access-Control-Allow-Origin"], "https://music.lynxpardelle.com")
 
+    def test_preflight_reflects_managed_alias_origin(self):
+        event = api_event("/api-proxy/read", {})
+        event["httpMethod"] = "OPTIONS"
+        event["headers"] = {"Origin": "https://listen.lynxpardelle.com"}
+
+        def load_item(_table_name, pk, sk="METADATA"):
+            if pk == "ALIAS#listen.lynxpardelle.com" and sk == "SITE":
+                return {"domain": "music.lynxpardelle.com"}
+            return None
+
+        with patch.object(common, "load_item", side_effect=load_item), \
+                patch.dict(os.environ, {"ALLOWED_CORS_ORIGINS": "https://zoolandingpage.com.mx,https://test.zoolandingpage.com.mx"}):
+            response = lf.lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(response["headers"]["Access-Control-Allow-Origin"], "https://listen.lynxpardelle.com")
+
     def test_preflight_does_not_reflect_unlisted_public_origin(self):
         event = api_event("/api-proxy/action", {})
         event["httpMethod"] = "OPTIONS"

@@ -63,7 +63,7 @@ Active profiles return the same public `runtime.auth` shape that the Angular app
 }
 ```
 
-Inactive profiles return `enabled: false` with `authProfileId` and `status`. Runtime-config rejects browser-supplied secret or policy fields; only `domain` and `authProfileId` are accepted in this public request.
+Inactive profiles return the same public shape with `enabled: false`; profile status and provisioning details stay server-only. Runtime-config rejects browser-supplied secret or policy fields; only `domain` and `authProfileId` are accepted in this public request. Browser requests are origin-bound: a public draft origin can request only its own domain, or a canonical domain when the origin is a managed alias proven by server-only registry metadata. `test.zoolandingpage.com.mx` and local QA origins can preview other domains.
 
 `POST /auth/provisioning-plan`
 
@@ -216,6 +216,7 @@ The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for futur
 - A single draft/site can configure multiple read sources and multiple actions.
 - A single draft/site can optionally configure one or more auth profiles.
 - Public auth runtime config exposes only safe public metadata and never exposes client secrets or social IdP secret refs.
+- Public auth runtime config rejects browser origins that do not belong to the requested domain or a proven managed alias for that domain.
 - Server-only provisioning plans are denied by default and remain plan-only until a future explicit deployment/provisioning decision.
 - The reusable JWT authorizer can protect future blogs, dashboards, uploads, and mutable actions using the same server-only registry policy.
 - The browser cannot choose arbitrary upstream URLs.
