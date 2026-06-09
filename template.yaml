@@ -19,6 +19,18 @@ Parameters:
     Type: String
     Default: zoolanding/api/
     Description: Secrets Manager name prefix for draft API credentials.
+  AuthRegistryFileName:
+    Type: String
+    Default: auth-profile-registry.json
+    Description: Server-only auth profile registry file under each published draft server folder.
+  AuthProvisioningAllowedRoleNames:
+    Type: String
+    Default: ''
+    Description: Comma-separated IAM role names allowed to read plan-only auth provisioning plans.
+  AuthProvisioningAllowedRoleArns:
+    Type: String
+    Default: ''
+    Description: Comma-separated IAM role ARNs allowed to read plan-only auth provisioning plans.
   LogLevel:
     Type: String
     Default: INFO
@@ -52,6 +64,12 @@ Resources:
             Ref: ConfigPayloadsBucketName
           ALLOWED_CORS_ORIGINS:
             Ref: AllowedCorsOrigins
+          AUTH_REGISTRY_FILE_NAME:
+            Ref: AuthRegistryFileName
+          AUTH_PROVISIONING_ALLOWED_ROLE_NAMES:
+            Ref: AuthProvisioningAllowedRoleNames
+          AUTH_PROVISIONING_ALLOWED_ROLE_ARNS:
+            Ref: AuthProvisioningAllowedRoleArns
           LOG_LEVEL:
             Ref: LogLevel
       Policies:
@@ -101,6 +119,73 @@ Resources:
               Ref: ApiProxyApi
             Path: /api-proxy/action
             Method: OPTIONS
+        AuthRuntimeConfigGet:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/runtime-config
+            Method: GET
+        AuthRuntimeConfigPost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/runtime-config
+            Method: POST
+        AuthRuntimeConfigOptions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/runtime-config
+            Method: OPTIONS
+        AuthProvisioningPlanPost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/provisioning-plan
+            Method: POST
+            Auth:
+              Authorizer: AWS_IAM
+        AuthProvisioningPlanOptions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/provisioning-plan
+            Method: OPTIONS
+
+  AuthJwtAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: auth_service.jwt_authorizer_handler
+      Description: Reusable JWT Lambda authorizer for protected Zoolanding APIs.
+      Environment:
+        Variables:
+          CONFIG_TABLE_NAME:
+            Ref: ConfigTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          AUTH_REGISTRY_FILE_NAME:
+            Ref: AuthRegistryFileName
+          LOG_LEVEL:
+            Ref: LogLevel
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigTableName}
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/*
 
 Outputs:
   ApiUrl:
@@ -115,7 +200,19 @@ Outputs:
     Description: Runtime API action endpoint URL.
     Value:
       Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/api-proxy/action
+  AuthRuntimeConfigEndpoint:
+    Description: Public runtime auth config endpoint URL.
+    Value:
+      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/auth/runtime-config
+  AuthProvisioningPlanEndpoint:
+    Description: Server-only plan-only auth provisioning endpoint URL.
+    Value:
+      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/auth/provisioning-plan
   FunctionName:
     Description: Deployed Lambda function name.
     Value:
       Ref: ApiProxyFunction
+  AuthJwtAuthorizerFunctionName:
+    Description: Reusable JWT authorizer Lambda function name.
+    Value:
+      Ref: AuthJwtAuthorizerFunction

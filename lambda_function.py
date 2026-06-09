@@ -7,6 +7,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional
 
+import auth_service
 from zoolanding_lambda_common import (
     bad_gateway,
     bad_request,
@@ -71,7 +72,15 @@ class UpstreamError(ApiProxyError):
     public_message = "Upstream request failed"
 
 
+class UnauthorizedError(ApiProxyError):
+    status_code = 401
+    public_message = "Unauthorized"
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    if auth_service.is_auth_service_path(event):
+        return auth_service.auth_lambda_handler(event, context)
+
     request_id = get_request_id(context)
     request_origin = _request_origin(event)
     set_request_cors_origin(request_origin)
@@ -91,6 +100,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         input_payload = _normalize_input(body.get("input"))
         policy = _load_policy_for_domain(domain)
         integration = _find_integration(policy, kind, target_id)
+        _enforce_integration_access(event, domain, integration)
         data = _execute_integration(integration, input_payload)
         return ok({"data": data})
     except ValueError:
@@ -99,6 +109,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return bad_request(exc.public_message)
     except NotFoundError as exc:
         return not_found(exc.public_message)
+    except UnauthorizedError as exc:
+        return json_response(401, {"ok": False, "error": exc.public_message})
     except UpstreamError:
         log("WARNING", "Upstream API proxy request failed", requestId=request_id)
         return bad_gateway("Upstream request failed")
@@ -235,6 +247,64 @@ def _execute_integration(integration: Dict[str, Any], input_payload: Dict[str, A
         max_response_bytes=_max_response_bytes(integration),
     )
     return _filter_response(response_data, integration)
+
+
+def _enforce_integration_access(event: Dict[str, Any], domain: str, integration: Dict[str, Any]) -> None:
+    access = integration.get("access")
+    if access is None:
+        return
+    if not isinstance(access, dict):
+        raise ValidationError("Integration access policy is invalid")
+
+    required = access.get("required", False)
+    if required is False:
+        return
+    if required is not True:
+        raise ValidationError("Integration access policy is invalid")
+
+    auth_profile_id = str(access.get("authProfileId") or "").strip()
+    if not auth_profile_id:
+        raise ValidationError("Integration access authProfileId is missing")
+
+    try:
+        auth_service.authorize_bearer_for_domain(
+            domain=domain,
+            auth_profile_id=auth_profile_id,
+            token=_bearer_token_from_event(event),
+            allowed_groups=_access_allowed_groups(access),
+        )
+    except auth_service.AuthJwtError as exc:
+        raise UnauthorizedError() from exc
+
+
+def _bearer_token_from_event(event: Dict[str, Any]) -> str:
+    headers = event.get("headers") if isinstance(event.get("headers"), dict) else {}
+    for key, value in headers.items():
+        if str(key).lower() != "authorization":
+            continue
+        authorization = str(value or "").strip()
+        if not authorization.lower().startswith("bearer "):
+            raise UnauthorizedError()
+        token = authorization[7:].strip()
+        if not token:
+            raise UnauthorizedError()
+        return token
+    raise UnauthorizedError()
+
+
+def _access_allowed_groups(access: Dict[str, Any]) -> list[str]:
+    value = access.get("allowedGroups")
+    if value is None:
+        return []
+    if isinstance(value, str):
+        normalized = value.strip()
+        return [normalized] if normalized else []
+    if not isinstance(value, list):
+        raise ValidationError("Integration access allowedGroups is invalid")
+    groups = [str(group).strip() for group in value if str(group).strip()]
+    if len(groups) != len(value):
+        raise ValidationError("Integration access allowedGroups is invalid")
+    return groups
 
 
 def _resolve_integration_url(

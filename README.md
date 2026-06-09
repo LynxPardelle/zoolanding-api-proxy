@@ -6,17 +6,24 @@ The Angular app calls:
 
 - `POST /api-proxy/read` for configured read data sources.
 - `POST /api-proxy/action` for configured mutable API actions.
+- `GET` or `POST /auth/runtime-config` for public, config-driven auth metadata.
+- `POST /auth/provisioning-plan` for server-only, plan-only Cognito provisioning output.
 
 The browser sends only `domain`, optional `pageId`, `sourceId` or `actionId`, and allowlisted input values. It never sends upstream URLs or credentials. The Lambda resolves the published server-only policy from `server/integrations.json`, loads credentials by `credentialRef` from SSM SecureString, calls the upstream API, filters the response, and returns safe JSON.
 
+Auth profiles are resolved from the published server-only file `server/auth-profile-registry.json`. The runtime auth endpoint accepts only `domain` and `authProfileId`, then returns the same public `runtime.auth` shape validated by the Angular app for active profiles. Planned, provisioning, suspended, and failed profiles return `enabled: false`. The provisioning endpoint is denied by default and returns only plan-only output when the caller's signed IAM role is explicitly allowlisted by `AUTH_PROVISIONING_ALLOWED_ROLE_NAMES` or `AUTH_PROVISIONING_ALLOWED_ROLE_ARNS`.
+
 Parameterized read sources can use server-owned `urlTemplate` values, for example `https://pokeapi.co/api/v2/pokemon/{pokemonName}`. Template placeholders must also appear in `allowedInputFields`; the Lambda trims and percent-encodes those values, uses them only to resolve the upstream URL, and keeps all undeclared fields blocked.
+
+Server-only `server/integrations.json` entries can protect individual sources/actions with an `access` block. `access` verifies the browser JWT against the server-only auth profile registry before the proxy calls upstream. Existing integration `auth` blocks remain reserved for upstream API credentials.
 
 ## AWS Dependencies
 
 - DynamoDB table: `zoolanding-config-registry`
 - S3 bucket: `zoolanding-config-payloads`
 - SSM Parameter Store SecureString for `credentialRef` values
-- API Gateway: `POST /api-proxy/read` and `POST /api-proxy/action`
+- API Gateway: `POST /api-proxy/read`, `POST /api-proxy/action`, `GET|POST /auth/runtime-config`, and `POST /auth/provisioning-plan`
+- PyJWT with crypto support for reusable JWT authorizer verification against JWKS
 
 ## Local Tests
 
@@ -58,6 +65,11 @@ The legacy script creates only missing Secrets Manager entries under `zoolanding
 
 - Credentials are stored in SSM SecureString and referenced by `credentialRef`.
 - Draft/browser payloads must not contain tokens, client secrets, private keys, or upstream URLs with embedded credentials.
+- Auth profile registries must not contain raw secrets, tokens, client secrets, private keys, passwords, credentials, or API keys. Social IdP credentials are represented by SSM/Secrets Manager secret refs only.
+- Public auth runtime config never includes social IdP secret refs or raw credentials.
+- Provisioning plans are server-only and plan-only; this repo does not create Cognito, Google, Facebook, DynamoDB, S3, API Gateway, or IAM resources unless a future deploy is explicitly run.
+- JWT authorization verifies RS256 tokens through JWKS, validates issuer, accepts either `aud` or Cognito access-token `client_id`, and then enforces tenant/group policy from the server-only profile.
+- Protected integrations use server-only `access.required`, `access.authProfileId`, and optional `access.allowedGroups`; invalid or missing user JWTs return a generic `Unauthorized` response before any upstream call.
 - Server-only integrations may configure safe static request headers through `headers`. Static `authorization`, `cookie`, `set-cookie`, and `x-api-key` headers are rejected so credentials keep flowing through `auth` and managed credential storage.
 - Supported auth types are `bearer`, `api-key-header`, and `oauth2-client-credentials`. The OAuth2 client-credentials flow reads `clientId` and `clientSecret` fields from the configured secret by default, exchanges them at the policy-controlled `auth.tokenUrl`, and sends only the resulting bearer token upstream.
 - The proxy rejects unknown `sourceId` or `actionId` values.
