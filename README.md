@@ -11,7 +11,7 @@ The Angular app calls:
 
 The browser sends only `domain`, optional `pageId`, `sourceId` or `actionId`, and allowlisted input values. It never sends upstream URLs or credentials. The Lambda resolves the published server-only policy from `server/integrations.json`, loads credentials by `credentialRef` from SSM SecureString, calls the upstream API, filters the response, and returns safe JSON.
 
-Auth profiles are resolved from the published server-only file `server/auth-profile-registry.json`. The runtime auth endpoint accepts only `domain` and `authProfileId`, then returns the same public `runtime.auth` shape validated by the Angular app. Active profiles return `enabled: true`; planned, provisioning, suspended, and failed profiles return the same secret-free public metadata with `enabled: false`. The provisioning endpoint is denied by default and returns only plan-only output when the caller's signed IAM role is explicitly allowlisted by `AUTH_PROVISIONING_ALLOWED_ROLE_NAMES` or `AUTH_PROVISIONING_ALLOWED_ROLE_ARNS`.
+Auth profiles are resolved from the published server-only file `server/auth-profile-registry.json`. The runtime auth endpoint accepts only `domain` and `authProfileId`, enforces that the browser `Origin` belongs to the requested domain or to a managed alias for that domain, then returns the same public `runtime.auth` shape validated by the Angular app. Active profiles return `enabled: true`; planned, provisioning, suspended, and failed profiles return the same secret-free public metadata with `enabled: false`. The provisioning endpoint is denied by default and returns only plan-only output when the caller's signed IAM role is explicitly allowlisted by `AUTH_PROVISIONING_ALLOWED_ROLE_NAMES` or `AUTH_PROVISIONING_ALLOWED_ROLE_ARNS`.
 
 Parameterized read sources can use server-owned `urlTemplate` values, for example `https://pokeapi.co/api/v2/pokemon/{pokemonName}`. Template placeholders must also appear in `allowedInputFields`; the Lambda trims and percent-encodes those values, uses them only to resolve the upstream URL, and keeps all undeclared fields blocked.
 
@@ -89,6 +89,6 @@ The legacy script creates only missing Secrets Manager entries under `zoolanding
 - The proxy rejects HTTP methods outside `GET`, `POST`, `PUT`, `PATCH`, and `DELETE`.
 - Responses are filtered by `response.allowedFields`.
 - Upstream failures return a generic public error.
-- A public draft origin may request only its own draft domain. `test.zoolandingpage.com.mx` and local QA origins may preview other domains.
+- A public draft origin may request only its own draft domain. Managed aliases are accepted only when the private registry proves the alias belongs to the requested domain through canonical site metadata (`aliases`, `domains`, or `environmentAliases`) or `ALIAS#<alias>, sk=SITE`. `test.zoolandingpage.com.mx` and local QA origins may preview other domains.
 
 See `instructions.md` for the complete contract.

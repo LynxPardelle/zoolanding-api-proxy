@@ -29,3 +29,10 @@
 - Local browser QA for optional remote auth can run through `local_auth_server.py` with `DRY_RUN=1` plus `LOCAL_AUTH_REGISTRY_DIR` or `LOCAL_AUTH_REGISTRY_FILE`; no registry path is hardcoded in runtime code.
 - The local registry resolver reads server-only `auth-profile-registry.json` from the configured local source and bypasses DynamoDB/S3 only when the explicit dry-run env vars are present.
 - `/auth/runtime-config` returns Angular-compatible, secret-free public auth metadata for both active and non-active profiles. Non-active profiles keep `enabled: false`; provisioning status and social IdP refs remain server-only.
+
+## 2026-06-09 02:49 CT - Auth Runtime Origin Isolation
+
+- Public `/auth/runtime-config` now checks browser `Origin` before loading a site's auth registry. Allowed origins are: missing origin for non-browser/public metadata reads, local QA origins, `test.zoolandingpage.com.mx`, the exact requested domain, or a managed alias proven by server-only registry metadata.
+- Managed alias proof can come from canonical site metadata listing the alias in `aliases`, `domains`, or `environmentAliases`, or from the DynamoDB alias lookup shape `ALIAS#<alias>, sk=SITE` pointing back to the requested canonical domain.
+- CORS managed-origin reflection also recognizes `ALIAS#<alias>, sk=SITE`, so a valid alias is not blocked by browser CORS after passing the Auth runtime guard.
+- This remained an offline hardening pass only: no AWS calls, no Cognito changes, no deploy, and no secrets or tokens added.

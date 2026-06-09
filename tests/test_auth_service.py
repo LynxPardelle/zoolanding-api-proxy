@@ -23,6 +23,7 @@ if PROJECT_ROOT not in sys.path:
 
 import auth_service as auth
 import lambda_function as lf
+import zoolanding_lambda_common as common
 
 
 class Ctx:
@@ -175,6 +176,107 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
             response = lf.lambda_handler(event, Ctx())
 
         self.assertEqual(response["statusCode"], 200)
+        self.assertTrue(payload(response)["auth"]["enabled"])
+
+    def test_public_origin_cannot_request_runtime_config_for_another_domain(self):
+        event = api_event(
+            "/auth/runtime-config",
+            {"domain": "example.test", "authProfileId": "staff"},
+            headers={"Origin": "https://music.example.test"},
+        )
+
+        with patch.object(auth, "load_item", return_value=None), \
+                patch.object(auth, "load_auth_registry_for_domain") as load_registry:
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(payload(response)["error"], "Origin is not allowed for requested domain")
+        load_registry.assert_not_called()
+
+    def test_managed_alias_origin_can_request_canonical_runtime_config(self):
+        event = api_event(
+            "/auth/runtime-config",
+            {"domain": "example.test", "authProfileId": "staff"},
+            headers={"Origin": "https://alias.example.test"},
+        )
+        metadata = {
+            "published": {
+                "versionId": "v1",
+                "prefix": "sites/example.test/versions/v1",
+            },
+            "environmentAliases": {
+                "production": ["alias.example.test"],
+            },
+        }
+
+        def auth_load_item(_table_name, pk, sk="METADATA"):
+            if pk == "SITE#example.test" and sk == "METADATA":
+                return metadata
+            return None
+
+        def cors_load_item(_table_name, pk, sk="METADATA"):
+            if pk == "ALIAS#alias.example.test" and sk == "SITE":
+                return {"domain": "example.test"}
+            return None
+
+        with patch.object(auth, "load_item", side_effect=auth_load_item), \
+                patch.object(auth, "load_json_from_s3", return_value=active_registry()), \
+                patch.object(common, "load_item", side_effect=cors_load_item), \
+                patch.dict(os.environ, {"ALLOWED_CORS_ORIGINS": "https://zoolandingpage.com.mx,https://test.zoolandingpage.com.mx"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(response["headers"]["Access-Control-Allow-Origin"], "https://alias.example.test")
+        self.assertTrue(payload(response)["auth"]["enabled"])
+
+    def test_alias_lookup_origin_can_request_canonical_runtime_config(self):
+        event = api_event(
+            "/auth/runtime-config",
+            {"domain": "example.test", "authProfileId": "staff"},
+            headers={"Origin": "https://lookup-alias.example.test"},
+        )
+        metadata = {
+            "published": {
+                "versionId": "v1",
+                "prefix": "sites/example.test/versions/v1",
+            },
+        }
+
+        def auth_load_item(_table_name, pk, sk="METADATA"):
+            if pk == "SITE#example.test" and sk == "METADATA":
+                return metadata
+            if pk == "ALIAS#lookup-alias.example.test" and sk == "SITE":
+                return {"domain": "example.test"}
+            return None
+
+        def cors_load_item(_table_name, pk, sk="METADATA"):
+            if pk == "ALIAS#lookup-alias.example.test" and sk == "SITE":
+                return {"domain": "example.test"}
+            return None
+
+        with patch.object(auth, "load_item", side_effect=auth_load_item), \
+                patch.object(auth, "load_json_from_s3", return_value=active_registry()), \
+                patch.object(common, "load_item", side_effect=cors_load_item), \
+                patch.dict(os.environ, {"ALLOWED_CORS_ORIGINS": "https://zoolandingpage.com.mx,https://test.zoolandingpage.com.mx"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(response["headers"]["Access-Control-Allow-Origin"], "https://lookup-alias.example.test")
+        self.assertTrue(payload(response)["auth"]["enabled"])
+
+    def test_test_origin_can_preview_runtime_config_for_other_domains(self):
+        event = api_event(
+            "/auth/runtime-config",
+            {"domain": "example.test", "authProfileId": "staff"},
+            headers={"Origin": "https://test.zoolandingpage.com.mx"},
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"ALLOWED_CORS_ORIGINS": "https://zoolandingpage.com.mx,https://test.zoolandingpage.com.mx"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(response["headers"]["Access-Control-Allow-Origin"], "https://test.zoolandingpage.com.mx")
         self.assertTrue(payload(response)["auth"]["enabled"])
 
 
