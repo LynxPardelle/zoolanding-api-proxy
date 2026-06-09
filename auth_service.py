@@ -697,18 +697,20 @@ def _validate_executor_plan_key(payload: Dict[str, Any], plan: Dict[str, Any]) -
 
 
 def _executor_idempotency_key(plan: Dict[str, Any], mode: str, requested_idempotency_key: Any) -> str:
-    requested = str(requested_idempotency_key or "").strip()
-    if requested:
-        if not re.fullmatch(r"[0-9a-f]{64}", requested):
-            raise AuthServiceError("Provisioning executor idempotencyKey is invalid")
-        return requested
-    return _stable_key(
+    expected = _stable_key(
         "executor",
         AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION,
         str(plan.get("planVersion") or ""),
         str(plan.get("planKey") or ""),
         mode,
     )
+    requested = str(requested_idempotency_key or "").strip()
+    if requested:
+        if not re.fullmatch(r"[0-9a-f]{64}", requested):
+            raise AuthServiceError("Provisioning executor idempotencyKey is invalid")
+        if requested != expected:
+            raise AuthServiceError("Provisioning executor idempotencyKey does not match current plan")
+    return expected
 
 
 def _cognito_executor_preview(

@@ -90,7 +90,7 @@ Provisioning-plan requests accept only `domain` and `authProfileId`. The respons
 }
 ```
 
-`/auth/provisioning-executor` is server-only and must stay IAM-authorized. Requests accept only `domain`, `authProfileId`, `mode`, optional `planKey`, and optional `idempotencyKey`. `dry-run` regenerates and validates the current plan, returns sanitized operation previews and a deterministic audit event, and never calls AWS. `apply` is explicit but fails closed with manual review required; it is not implemented and must not create Cognito resources until a future approved deploy/provisioning pass.
+`/auth/provisioning-executor` is server-only and must stay IAM-authorized. Requests accept only `domain`, `authProfileId`, `mode`, optional `planKey`, and optional `idempotencyKey`. `dry-run` regenerates and validates the current plan, returns sanitized operation previews and a deterministic audit event, and does not perform AWS writes, call Cognito, or create/update/delete resources; it may read the server-only registry from the configured local or deployed sources. `apply` is explicit but fails closed with manual review required; it is not implemented and must not create Cognito resources until a future approved deploy/provisioning pass.
 
 ## Server-Only Policy
 

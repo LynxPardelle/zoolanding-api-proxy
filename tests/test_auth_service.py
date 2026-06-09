@@ -616,6 +616,51 @@ class TestAuthServiceProvisioningExecutor(unittest.TestCase):
         self.assertNotIn("tenant-a", body["executor"]["idempotencyKey"])
         self.assertNotIn("secret", serialized.lower())
 
+    def test_executor_accepts_expected_idempotency_key_for_current_plan(self):
+        initial_event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "dry-run",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            initial_response = auth.auth_lambda_handler(initial_event, Ctx())
+
+        expected_key = payload(initial_response)["executor"]["idempotencyKey"]
+        event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "dry-run",
+            "idempotencyKey": expected_key,
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["executor"]["idempotencyKey"], expected_key)
+
+    def test_executor_rejects_valid_hex_idempotency_key_that_does_not_match_current_plan(self):
+        event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "dry-run",
+            "idempotencyKey": "0" * 64,
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(
+            payload(response)["error"],
+            "Provisioning executor idempotencyKey does not match current plan",
+        )
+
     def test_executor_rejects_mismatched_plan_key(self):
         event = self.trusted_event({
             "domain": "example.test",
