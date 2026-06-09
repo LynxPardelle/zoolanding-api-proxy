@@ -56,6 +56,7 @@ Then point the Angular dev server proxy at `http://127.0.0.1:5055`. The local au
 Do not deploy or create secrets until the frontend and policy contract are reviewed.
 
 ```bash
+sam build --no-cached
 sam deploy
 ```
 

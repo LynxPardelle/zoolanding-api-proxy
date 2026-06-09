@@ -36,3 +36,12 @@
 - Managed alias proof can come from canonical site metadata listing the alias in `aliases`, `domains`, or `environmentAliases`, or from the DynamoDB alias lookup shape `ALIAS#<alias>, sk=SITE` pointing back to the requested canonical domain.
 - CORS managed-origin reflection also recognizes `ALIAS#<alias>, sk=SITE`, so a valid alias is not blocked by browser CORS after passing the Auth runtime guard.
 - This remained an offline hardening pass only: no AWS calls, no Cognito changes, no deploy, and no secrets or tokens added.
+
+## 2026-06-09 03:30 CT - Auth Runtime Production Deploy
+
+- PR #2 (`feat: isolate auth runtime origins`) and PR #3 (`fix: treat missing S3 payloads as not found`) were merged to `main` and deployed to the `zoolanding-api-proxy` SAM stack in `us-east-1`.
+- Always run `sam build --no-cached` before deploy or deploy the fresh `.aws-sam/build/template.yaml` explicitly. A first deploy from stale `.aws-sam` artifacts updated only Lambda code and did not add the Auth API Gateway routes.
+- Final CloudFormation status was `UPDATE_COMPLETE`. API Gateway `yxp97qlog2` now has `GET`, `POST`, and `OPTIONS` for `/auth/runtime-config`; stack output `AuthRuntimeConfigEndpoint` is `https://yxp97qlog2.execute-api.us-east-1.amazonaws.com/Prod/auth/runtime-config`.
+- CloudFront distribution `E28Y8KTE8ZVWY9` for `api.zoolandingpage.com.mx` now has `/auth/*` routed to `zoolanding-api-proxy-prod`, copied from `/api-proxy/*`, with managed caching disabled and origin request policy `Managed-AllViewerExceptHostHeader`.
+- Live smoke through both raw execute-api and `https://api.zoolandingpage.com.mx` verified: `OPTIONS /auth/runtime-config` returns `200` with matching CORS; cross-domain configured origin returns `400` with `Origin is not allowed for requested domain`; exact Zoosite domain and `zoositioweb.com` alias reach Lambda and return controlled `404 Auth profile registry not found`.
+- Zoosite currently does not have `server/auth-profile-registry.json` in the published production S3 prefix, so the expected future `enabled:false` planned-auth response is still blocked on publishing the server-only registry through the draft pipeline.
