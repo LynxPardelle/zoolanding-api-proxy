@@ -37,14 +37,17 @@ AUTH_PROVISIONING_ALLOWED_ROLE_NAMES = os.getenv("AUTH_PROVISIONING_ALLOWED_ROLE
 AUTH_PROVISIONING_ALLOWED_ROLE_ARNS = os.getenv("AUTH_PROVISIONING_ALLOWED_ROLE_ARNS", "")
 _AUTH_REQUEST_ORIGIN = None
 
-AUTH_PATHS = {"/auth/runtime-config", "/auth/provisioning-plan"}
+AUTH_PATHS = {"/auth/runtime-config", "/auth/provisioning-plan", "/auth/provisioning-executor"}
 AUTH_PROFILE_STATUSES = {"active", "planned", "provisioning", "suspended", "failed"}
 AUTH_PROVISIONING_PLAN_SCHEMA_VERSION = "2026-06-09.v1"
+AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION = "2026-06-09.executor.v1"
 TEST_PREVIEW_ORIGIN_HOST = "test.zoolandingpage.com.mx"
 CONTROL_OR_WHITESPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 RAW_SECRET_KEY_RE = re.compile(r"(secret|token|password|private[_-]?key|credential|api[_-]?key)", re.I)
 RUNTIME_CONFIG_ALLOWED_KEYS = {"domain", "authProfileId"}
 PROVISIONING_PLAN_ALLOWED_KEYS = {"domain", "authProfileId"}
+PROVISIONING_EXECUTOR_ALLOWED_KEYS = {"domain", "authProfileId", "mode", "planKey", "idempotencyKey"}
+PROVISIONING_EXECUTOR_MODES = {"dry-run", "apply"}
 ALIAS_TARGET_KEYS = (
     "domain",
     "canonicalDomain",
@@ -122,6 +125,9 @@ def auth_lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if path == "/auth/provisioning-plan" and method == "POST":
             payload = _request_payload(event)
             return _provisioning_plan_response(event, payload)
+        if path == "/auth/provisioning-executor" and method == "POST":
+            payload = _request_payload(event)
+            return _provisioning_executor_response(event, payload)
         return _auth_response(404, {"ok": False, "error": "Auth service route not found"})
     except ValueError as exc:
         return _auth_response(400, {"ok": False, "error": str(exc)})
@@ -410,6 +416,31 @@ def _provisioning_plan_response(event: Dict[str, Any], payload: Dict[str, Any]) 
     return _auth_response(200, {"ok": True, "domain": domain, "plan": _cognito_plan(domain, profile)})
 
 
+def _provisioning_executor_response(event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not _is_trusted_server_request(event):
+        raise AuthUnauthorizedError()
+    _reject_unsupported_provisioning_executor_options(payload)
+
+    mode = _executor_mode(payload)
+    domain = normalize_domain(payload.get("domain"))
+    registry = load_auth_registry_for_domain(domain)
+    profile = _find_profile(registry, str(payload.get("authProfileId") or registry.get("defaultAuthProfileId") or ""))
+    plan = _cognito_plan(domain, profile)
+    _validate_executor_plan_key(payload, plan)
+    executor = _cognito_executor_preview(plan, mode=mode, requested_idempotency_key=payload.get("idempotencyKey"))
+
+    if mode == "apply":
+        executor["operations"] = []
+        executor["blockedReason"] = "apply-not-implemented"
+        return _auth_response(501, {
+            "ok": False,
+            "error": "Cognito executor apply is not implemented",
+            "executor": executor,
+        })
+
+    return _auth_response(200, {"ok": True, "domain": domain, "executor": executor})
+
+
 def _public_runtime_auth(profile: Dict[str, Any], *, enabled: bool = True) -> Dict[str, Any]:
     issuer = str(profile.get("issuer") or "").strip()
     audiences = _audiences(profile)
@@ -645,6 +676,105 @@ def _reject_unsupported_runtime_options(payload: Dict[str, Any]) -> None:
 def _reject_unsupported_provisioning_options(payload: Dict[str, Any]) -> None:
     if not all(str(key) in PROVISIONING_PLAN_ALLOWED_KEYS for key in payload.keys()):
         raise AuthServiceError("Unsupported auth provisioning option")
+
+
+def _reject_unsupported_provisioning_executor_options(payload: Dict[str, Any]) -> None:
+    if not all(str(key) in PROVISIONING_EXECUTOR_ALLOWED_KEYS for key in payload.keys()):
+        raise AuthServiceError("Unsupported auth provisioning executor option")
+
+
+def _executor_mode(payload: Dict[str, Any]) -> str:
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode not in PROVISIONING_EXECUTOR_MODES:
+        raise AuthServiceError("Unsupported auth provisioning executor mode")
+    return mode
+
+
+def _validate_executor_plan_key(payload: Dict[str, Any], plan: Dict[str, Any]) -> None:
+    requested_plan_key = str(payload.get("planKey") or "").strip()
+    if requested_plan_key and requested_plan_key != str(plan.get("planKey") or ""):
+        raise AuthServiceError("Provisioning executor planKey does not match current plan")
+
+
+def _executor_idempotency_key(plan: Dict[str, Any], mode: str, requested_idempotency_key: Any) -> str:
+    requested = str(requested_idempotency_key or "").strip()
+    if requested:
+        if not re.fullmatch(r"[0-9a-f]{64}", requested):
+            raise AuthServiceError("Provisioning executor idempotencyKey is invalid")
+        return requested
+    return _stable_key(
+        "executor",
+        AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION,
+        str(plan.get("planVersion") or ""),
+        str(plan.get("planKey") or ""),
+        mode,
+    )
+
+
+def _cognito_executor_preview(
+    plan: Dict[str, Any],
+    *,
+    mode: str,
+    requested_idempotency_key: Any = None,
+) -> Dict[str, Any]:
+    idempotency_key = _executor_idempotency_key(plan, mode, requested_idempotency_key)
+    operations = [_executor_operation_preview(operation) for operation in plan.get("operations", []) if isinstance(operation, dict)]
+    execution_status = "preview-only" if mode == "dry-run" else "manual-review-required"
+    audit_event = {
+        "eventType": "cognito-provisioning-executor",
+        "auditKey": _stable_key(
+            "audit",
+            AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION,
+            str(plan.get("planKey") or ""),
+            idempotency_key,
+            mode,
+            execution_status,
+        ),
+        "schemaVersion": AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION,
+        "mode": mode,
+        "executionStatus": execution_status,
+        "planKey": str(plan.get("planKey") or ""),
+        "idempotencyKey": idempotency_key,
+        "domain": str(plan.get("domain") or ""),
+        "authProfileId": str(plan.get("authProfileId") or ""),
+        "operationCount": len(operations),
+        "mutationAttempted": False,
+    }
+    return {
+        "schemaVersion": AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION,
+        "provider": "cognito",
+        "mode": mode,
+        "executionStatus": execution_status,
+        "planVersion": str(plan.get("planVersion") or ""),
+        "planKey": str(plan.get("planKey") or ""),
+        "idempotencyKey": idempotency_key,
+        "target": {
+            "domain": str(plan.get("domain") or ""),
+            "authProfileId": str(plan.get("authProfileId") or ""),
+        },
+        "operations": operations,
+        "auditEvent": audit_event,
+    }
+
+
+def _executor_operation_preview(operation: Dict[str, Any]) -> Dict[str, Any]:
+    sanitized = {
+        "operationId": str(operation.get("operationId") or ""),
+        "operationKey": str(operation.get("operationKey") or ""),
+        "idempotencyKey": str(operation.get("idempotencyKey") or ""),
+        "stage": str(operation.get("stage") or ""),
+        "expectedStatusAfterCompletion": str(operation.get("expectedStatusAfterCompletion") or ""),
+        "willMutate": False,
+    }
+    depends_on = _string_list(operation.get("dependsOn"))
+    if depends_on:
+        sanitized["dependsOn"] = depends_on
+    target = operation.get("target") if isinstance(operation.get("target"), dict) else {}
+    sanitized["target"] = {
+        "domain": str(target.get("domain") or ""),
+        "authProfileId": str(target.get("authProfileId") or ""),
+    }
+    return sanitized
 
 
 def _is_trusted_server_request(event: Dict[str, Any]) -> bool:

@@ -53,3 +53,11 @@
 - Plan responses are now deterministic and versioned with `planVersion`, `planKey`, stable per-operation `operationKey`, and stable hashed `idempotencyKey` values so a future executor can resume safely without deriving its own keys.
 - Plans now distinguish `planned`, `provisioning`, `active`, `suspended`, and `failed` explicitly. `planned` and `provisioning` return resumable operations toward `active`; `active` returns an explicit noop contract; `suspended` and `failed` return explicit manual-review contracts with runtime auth still disabled.
 - The plan payload now carries domain, tenant, `authProfileId`, runtime public-client config, hosted UI details, expected post-activation outputs, group policy, and normalized social IdP metadata by reference only. Supported social provider normalization covers legacy `socialIdpSecretRefs` plus structured `socialIdentityProviders` entries for Google, Facebook, and OIDC-style providers without copying secret values.
+
+## 2026-06-09 17:38 CT - Auth Cognito Executor Scaffold
+
+- `/auth/provisioning-executor` is now scaffolded as a server-only IAM route in the SAM template, sharing the same signed-role allowlist posture as `/auth/provisioning-plan`.
+- Executor requests accept only `domain`, `authProfileId`, `mode`, optional `planKey`, and optional 64-hex `idempotencyKey`; browser/server-supplied secret or override fields are rejected before registry loading.
+- `mode: dry-run` regenerates the current Cognito plan, validates optional `planKey`, and returns sanitized operation previews plus deterministic audit/idempotency keys without secret refs or raw credential material.
+- `mode: apply` intentionally fails closed with `501`, `manual-review-required`, and no operations. Real Cognito creation/update/delete remains pending explicit approval, implementation, validation, and future deploy.
+- This pass stayed local-only: no deploy, no AWS/Cognito/API Gateway/IAM/DynamoDB/S3/SSM/Secrets Manager calls, no secrets/tokens added, and no push/PR.
