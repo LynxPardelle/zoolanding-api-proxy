@@ -78,6 +78,30 @@ def response_payload(response):
     return json.loads(response["body"])
 
 
+def active_auth_registry(*, profile_groups=None):
+    return {
+        "version": 1,
+        "profiles": [
+            {
+                "authProfileId": "staff",
+                "status": "active",
+                "tenantId": "tenant-a",
+                "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+                "hostedUiDomain": "https://auth.example.test",
+                "clientId": "public-client-id",
+                "audiences": ["public-client-id"],
+                "loginPath": "/login",
+                "logoutPath": "/logout",
+                "callbackUrls": ["https://music.lynxpardelle.com/auth/callback"],
+                "logoutUrls": ["https://music.lynxpardelle.com/logout"],
+                "allowedGroups": profile_groups or ["Editors"],
+                "tenantClaim": "custom:tenant_id",
+                "groupClaim": "cognito:groups",
+            },
+        ],
+    }
+
+
 class TestApiProxyHandler(unittest.TestCase):
     def setUp(self):
         lf._SSM_CLIENT = None
@@ -138,6 +162,18 @@ class TestApiProxyHandler(unittest.TestCase):
                     "response": {"allowedFields": ["items.title", "items.href"]},
                 },
                 {
+                    "id": "member-posts",
+                    "method": "GET",
+                    "url": "https://cms.example.test/member-posts",
+                    "allowedInputFields": ["section"],
+                    "access": {
+                        "required": True,
+                        "authProfileId": "staff",
+                        "allowedGroups": ["Editors"],
+                    },
+                    "response": {"allowedFields": ["items.title"]},
+                },
+                {
                     "id": "tidal-albums",
                     "method": "GET",
                     "url": "https://openapi.tidal.com/v2/artists/10212180/relationships/albums",
@@ -177,6 +213,20 @@ class TestApiProxyHandler(unittest.TestCase):
                     "method": "PUT",
                     "url": "https://music.example.test/rating",
                     "allowedInputFields": ["songId", "rating"],
+                    "response": {"allowedFields": ["status"]},
+                },
+                {
+                    "id": "protected-newsletter",
+                    "method": "POST",
+                    "url": "https://mailing.example.test/protected-subscribe",
+                    "credentialRef": "zoolanding/api/music/newsletter",
+                    "auth": {"type": "bearer", "secretField": "accessToken"},
+                    "access": {
+                        "required": True,
+                        "authProfileId": "staff",
+                        "allowedGroups": ["Editors"],
+                    },
+                    "allowedInputFields": ["email"],
                     "response": {"allowedFields": ["status"]},
                 },
                 {
@@ -260,6 +310,18 @@ class TestApiProxyHandler(unittest.TestCase):
                     {"title": "Melancholy", "href": "https://example.test/2", "internalId": "secret"},
                 ],
                 "debug": "hidden",
+            }
+        if kwargs["url"] == "https://cms.example.test/member-posts":
+            return {
+                "items": [
+                    {"title": "Private launch notes", "body": "hidden"},
+                ],
+                "debug": "hidden",
+            }
+        if kwargs["url"] == "https://mailing.example.test/protected-subscribe":
+            return {
+                "status": "subscribed",
+                "accessToken": "must-not-return",
             }
         if kwargs["url"] == "https://openapi.tidal.com/v2/artists/10212180/relationships/albums":
             return {
@@ -471,6 +533,111 @@ class TestApiProxyHandler(unittest.TestCase):
         })
         self.assertNotIn("internalId", response["body"])
         self.assertNotIn("debug", response["body"])
+
+    def test_protected_source_requires_bearer_token_without_upstream_call(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "sourceId": "member-posts",
+            "input": {"section": "staff"},
+        })
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 401)
+        self.assertEqual(payload["error"], "Unauthorized")
+        self.assertEqual(self.fetch_calls, [])
+
+    def test_protected_source_allows_verified_claims_without_forwarding_user_token(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "sourceId": "member-posts",
+            "input": {"section": "staff"},
+        })
+        event["headers"] = {"Authorization": "Bearer user.jwt.token"}
+        claims = {
+            "sub": "user-123",
+            "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+            "client_id": "public-client-id",
+            "custom:tenant_id": "tenant-a",
+            "cognito:groups": ["Editors"],
+        }
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf.auth_service, "load_auth_registry_for_domain", return_value=active_auth_registry()), \
+                patch.object(lf.auth_service, "verify_jwt", return_value=claims) as verify_jwt, \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(payload["data"], {"items": [{"title": "Private launch notes"}]})
+        verify_jwt.assert_called_once()
+        self.assertNotIn("Authorization", self.fetch_calls[0]["headers"])
+        self.assertNotIn("user.jwt.token", response["body"])
+
+    def test_protected_source_can_narrow_groups_beyond_profile_policy(self):
+        event = api_event("/api-proxy/read", {
+            "domain": "music.lynxpardelle.com",
+            "sourceId": "member-posts",
+            "input": {"section": "staff"},
+        })
+        event["headers"] = {"Authorization": "Bearer user.jwt.token"}
+        policy = json.loads(json.dumps(self.policy))
+        for source in policy["sources"]:
+            if source["id"] == "member-posts":
+                source["access"]["allowedGroups"] = ["Admins"]
+        claims = {
+            "sub": "user-123",
+            "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+            "client_id": "public-client-id",
+            "custom:tenant_id": "tenant-a",
+            "cognito:groups": ["Editors"],
+        }
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=policy), \
+                patch.object(lf.auth_service, "load_auth_registry_for_domain", return_value=active_auth_registry(profile_groups=["Editors", "Admins"])), \
+                patch.object(lf.auth_service, "verify_jwt", return_value=claims), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 401)
+        self.assertEqual(payload["error"], "Unauthorized")
+        self.assertEqual(self.fetch_calls, [])
+        self.assertNotIn("user.jwt.token", response["body"])
+
+    def test_protected_action_uses_upstream_credential_instead_of_user_bearer(self):
+        event = api_event("/api-proxy/action", {
+            "domain": "music.lynxpardelle.com",
+            "actionId": "protected-newsletter",
+            "input": {"email": "listener@example.test"},
+        })
+        event["headers"] = {"Authorization": "Bearer user.jwt.token"}
+        claims = {
+            "sub": "user-123",
+            "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+            "client_id": "public-client-id",
+            "custom:tenant_id": "tenant-a",
+            "cognito:groups": ["Editors"],
+        }
+
+        with patch.object(lf, "_load_policy_for_domain", return_value=self.policy), \
+                patch.object(lf.auth_service, "load_auth_registry_for_domain", return_value=active_auth_registry()), \
+                patch.object(lf.auth_service, "verify_jwt", return_value=claims) as verify_jwt, \
+                patch.object(lf, "_get_secret", return_value={"accessToken": "upstream-access-token"}), \
+                patch.object(lf, "_fetch_upstream", side_effect=self.fake_fetch):
+            response = lf.lambda_handler(event, Ctx())
+
+        payload = response_payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(payload["data"], {"status": "subscribed"})
+        verify_jwt.assert_called_once()
+        self.assertEqual(self.fetch_calls[0]["headers"]["Authorization"], "Bearer upstream-access-token")
+        self.assertNotIn("user.jwt.token", json.dumps(self.fetch_calls[0]))
+        self.assertNotIn("upstream-access-token", response["body"])
 
     def test_read_source_resolves_oauth_client_credentials_and_filters_tidal_response(self):
         event = api_event("/api-proxy/read", {

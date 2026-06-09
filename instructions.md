@@ -29,6 +29,53 @@
 }
 ```
 
+`GET /auth/runtime-config?domain=music.lynxpardelle.com&authProfileId=staff`
+
+or:
+
+```json
+{
+  "domain": "music.lynxpardelle.com",
+  "authProfileId": "staff"
+}
+```
+
+Active profiles return the same public `runtime.auth` shape that the Angular app validates:
+
+```json
+{
+  "ok": true,
+  "domain": "music.lynxpardelle.com",
+  "auth": {
+    "enabled": true,
+    "authProfileId": "staff",
+    "provider": "cognito",
+    "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+    "hostedUiDomain": "https://auth.example.test",
+    "clientId": "public-client-id",
+    "scopes": ["openid", "email", "profile"],
+    "redirectPath": "/auth/callback",
+    "logoutPath": "/logout",
+    "loginPath": "/login",
+    "groupsClaim": "cognito:groups",
+    "allowedGroups": ["Editors"]
+  }
+}
+```
+
+Inactive profiles return `enabled: false` with `authProfileId` and `status`. Runtime-config rejects browser-supplied secret or policy fields; only `domain` and `authProfileId` are accepted in this public request.
+
+`POST /auth/provisioning-plan`
+
+```json
+{
+  "domain": "music.lynxpardelle.com",
+  "authProfileId": "staff"
+}
+```
+
+`/auth/provisioning-plan` is server-only. It is denied unless the API Gateway/Lambda request context contains a signed IAM role ARN whose role name or ARN is allowlisted by environment configuration.
+
 ## Server-Only Policy
 
 Published drafts can include `server/integrations.json` in the config payload bucket. Runtime-read must not expose this file to the browser.
@@ -56,6 +103,20 @@ Published drafts can include `server/integrations.json` in the config payload bu
         "singleItem": true,
         "allowedFields": ["id", "name", "sprites.other.official-artwork.front_default", "types.type.name"]
       }
+    },
+    {
+      "id": "member-posts",
+      "method": "GET",
+      "url": "https://cms.example.test/member-posts",
+      "access": {
+        "required": true,
+        "authProfileId": "staff",
+        "allowedGroups": ["Editors"]
+      },
+      "allowedInputFields": ["section"],
+      "response": {
+        "allowedFields": ["items.title", "items.href"]
+      }
     }
   ],
   "actions": [
@@ -76,6 +137,14 @@ Published drafts can include `server/integrations.json` in the config payload bu
   ]
 }
 ```
+
+Access options:
+
+- Omit `access` or set `access.required: false` for public integrations.
+- Set `access.required: true` for protected sources/actions. Protected integrations require a browser `Authorization: Bearer <jwt>` header.
+- `access.authProfileId` selects the server-only auth profile used to verify issuer, audience/client ID, tenant, and profile groups.
+- `access.allowedGroups` can further narrow access for a specific source/action beyond the profile's own group policy.
+- The user JWT is never forwarded upstream. Upstream credentials still use `credentialRef` plus the existing `auth` block.
 
 Auth options:
 
@@ -105,9 +174,50 @@ The script is idempotent: existing secrets are left untouched so real values ent
 }
 ```
 
+## Auth Profile Registry
+
+Published drafts can include `server/auth-profile-registry.json` in the same private payload prefix as `server/integrations.json`. Runtime-read must not expose this file to the browser.
+
+```json
+{
+  "version": 1,
+  "profiles": [
+    {
+      "authProfileId": "staff",
+      "status": "active",
+      "tenantId": "tenant-a",
+      "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+      "hostedUiDomain": "https://auth.example.test",
+      "clientId": "public-client-id",
+      "audiences": ["public-client-id"],
+      "loginPath": "/login",
+      "logoutPath": "/logout",
+      "callbackUrls": ["https://music.lynxpardelle.com/auth/callback"],
+      "logoutUrls": ["https://music.lynxpardelle.com/logout"],
+      "scopes": ["openid", "email", "profile"],
+      "tenantClaim": "custom:tenant_id",
+      "groupClaim": "cognito:groups",
+      "allowedGroups": ["Editors"],
+      "socialIdpSecretRefs": {
+        "google": "/zoolanding/auth/tenant-a/staff/google",
+        "facebook": "/zoolanding/auth/tenant-a/staff/facebook"
+      }
+    }
+  ]
+}
+```
+
+Raw secrets, tokens, client secrets, private keys, passwords, credentials, and API keys are rejected in the registry. Social IdP setup uses secret refs only, and those refs must look like SSM/Secrets Manager references such as `/zoolanding/auth/tenant-a/staff/google` or AWS SSM/Secrets Manager ARNs. Active profiles must include `tenantId`, use absolute HTTPS `issuer` and `hostedUiDomain` values, same-origin auth paths that start with `/`, and HTTPS callback/logout URLs.
+
+The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for future protected APIs. It verifies RS256 tokens through JWKS, keeps the full Cognito issuer path when building `/.well-known/jwks.json`, accepts either `aud` or Cognito access-token `client_id`, and enforces tenant/group policy from the server-only profile.
+
 ## Acceptance Criteria
 
 - A single draft/site can configure multiple read sources and multiple actions.
+- A single draft/site can optionally configure one or more auth profiles.
+- Public auth runtime config exposes only safe public metadata and never exposes client secrets or social IdP secret refs.
+- Server-only provisioning plans are denied by default and remain plan-only until a future explicit deployment/provisioning decision.
+- The reusable JWT authorizer can protect future blogs, dashboards, uploads, and mutable actions using the same server-only registry policy.
 - The browser cannot choose arbitrary upstream URLs.
 - The browser cannot send undeclared input fields.
 - Parameterized detail sources can resolve server-owned upstream URLs from allowlisted scalar input without exposing arbitrary URL control to the browser.
@@ -122,3 +232,4 @@ The script is idempotent: existing secrets are left untouched so real values ent
 - This repo creates only placeholder Secrets Manager entries; it does not store, generate, or rotate real upstream credential values.
 - This repo does not deploy itself automatically.
 - This repo does not expose `server/integrations.json` through runtime-read.
+- This repo does not create Cognito user pools, app clients, domains, Google/Facebook IdPs, API Gateway authorizers, or IAM roles unless a future deploy/provisioning step is explicitly run.
