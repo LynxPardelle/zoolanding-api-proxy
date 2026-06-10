@@ -7,5 +7,5 @@ s3_prefix = "zoolanding-api-proxy"
 region = "us-east-1"
 confirm_changeset = false
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "ConfigTableName=zoolanding-config-registry ConfigPayloadsBucketName=zoolanding-config-payloads AllowedCorsOrigins=https://zoolandingpage.com.mx,https://test.zoolandingpage.com.mx SecretNamePrefix=zoolanding/api/ LogLevel=INFO"
+parameter_overrides = "ConfigTableName=zoolanding-config-registry ConfigPayloadsBucketName=zoolanding-config-payloads AllowedCorsOrigins=https://zoolandingpage.com.mx,https://test.zoolandingpage.com.mx SecretNamePrefix=zoolanding/api/ AuthRegistryFileName=auth-profile-registry.json AuthProvisioningAllowedRoleArns=arn:aws:iam::765932874577:user/ADMIN-AIM-CLI AuthProvisioningApplyEnabled=false AuthProvisioningApplyAllowedDomains=zoositioweb.com.mx AuthProvisioningApplyAllowedTenants=tenant-a AuthProvisioningStateTableName=zoolanding-auth-provisioning-state AuthProvisioningSecretParameterPrefix=zoolanding/auth/ AuthProvisioningSecretNamePrefix=/zoolanding/auth/ LogLevel=INFO"
 image_repositories = []
