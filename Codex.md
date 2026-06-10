@@ -67,3 +67,15 @@
 - `origin/main` was verified at `768fbb7afe2721f51a274935edd5ec4dbe4ec31e`, with PR #4 and PR #5 present in merge history.
 - Steps 3, 4, and 5 are now documented in `docs/auth-provisioning-rollout-and-apply-plan.md`: API proxy deploy plan, post-deploy smoke plan, and future real Cognito apply design.
 - This documentation pass did not deploy, call AWS, call Cognito, create real resources, read or write secrets, or add tokens.
+
+## 2026-06-09 19:30 CT - Auth Provisioning Production Deploy
+
+- After explicit deploy approval, `origin/main` at `409f8576f59b456aa58b15b826d21de7e41a3726` was deployed to the `zoolanding-api-proxy` SAM stack in `us-east-1` from the fresh `.aws-sam/build/template.yaml`.
+- Preflight passed before deploy: `python -m unittest discover -s tests -p "test_*.py"` returned `Ran 65 tests ... OK`; `sam validate --lint` reported a valid template; `pip-audit -r requirements.txt` reported `No known vulnerabilities found`; `sam build --no-cached` succeeded.
+- The first deploy command attempt did not create a changeset because SAM rejected an empty `AuthProvisioningAllowedRoleNames=` parameter. The successful deploy omitted that empty parameter and set `AuthProvisioningAllowedRoleArns` to the exact current IAM caller ARN for the deploy/smoke principal.
+- CloudFormation completed with `UPDATE_COMPLETE`. The changeset added the `/auth/provisioning-executor` POST/OPTIONS Lambda permissions and a new API Gateway deployment, modified the API Gateway RestApi/Stage and both Lambda functions, and deleted the previous API Gateway deployment.
+- Stack outputs now include `AuthProvisioningExecutorEndpoint=https://yxp97qlog2.execute-api.us-east-1.amazonaws.com/Prod/auth/provisioning-executor` in addition to the existing `ApiUrl`, runtime-config, provisioning-plan, and function-name outputs.
+- Live raw execute-api smoke verified: Zoosite `GET` and `POST /auth/runtime-config` return `200`, `ok:true`, `auth.authProfileId:"staff"`, and `auth.enabled:false`; bad origin returns `400` with `Origin is not allowed for requested domain`; unsigned `POST /auth/provisioning-plan` and `/auth/provisioning-executor` return `403 Missing Authentication Token`; OPTIONS for provisioning-plan and provisioning-executor return `200`.
+- Live signed IAM smoke verified with an exact allowlisted caller: `POST /auth/provisioning-plan` returns `200`, `mode:"plan-only"`, `status:"planned"`, and six operations; executor `mode:"dry-run"` returns `200`, `executionStatus:"preview-only"`, six operations, and no `secretRefs`; executor `mode:"apply"` returns `501`, `manual-review-required`, and zero operations.
+- Live custom-domain smoke through `https://api.zoolandingpage.com.mx` verified: Zoosite runtime-config returns `200` with `auth.enabled:false`, `OPTIONS /auth/provisioning-executor` returns `200`, and unsigned `POST /auth/provisioning-executor` returns `403 Missing Authentication Token`.
+- No Cognito user pools, app clients, Hosted UI domains, Google/Facebook IdPs, users, groups, or other Cognito resources were created. The deployed executor still keeps real apply closed with `501/manual-review-required`.
