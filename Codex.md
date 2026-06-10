@@ -120,7 +120,7 @@
 ## 2026-06-09 23:15 CT - Guarded Apply Production Readiness Deploy
 
 - PR #10 was merged to `main` as `2be60d0`, then deployed to stack `zoolanding-api-proxy` in `us-east-1`.
-- First deploy preserved `AuthProvisioningApplyEnabled=false` and the exact allowed caller ARN. A second deploy set live apply allowlists to `AuthProvisioningApplyAllowedDomains=zoositioweb.com.mx` and `AuthProvisioningApplyAllowedTenants=tenant-a`, still with apply disabled.
+- First deploy preserved `AuthProvisioningApplyEnabled=false` and the exact allowed caller ARN. A later corrected deploy set live apply allowlists to `AuthProvisioningApplyAllowedDomains=zoositioweb.com.mx` and `AuthProvisioningApplyAllowedTenants=zoosite`, matching the live plan tenant ID, still with apply disabled.
 - CloudFormation completed `UPDATE_COMPLETE`. Stack outputs still include `ApiUrl=https://yxp97qlog2.execute-api.us-east-1.amazonaws.com/Prod`, `AuthProvisioningExecutorFunctionName=zoolanding-api-proxy-AuthProvisioningExecutorFunct-D4RqgVhOtoJt`, and `AuthProvisioningStateTableName=zoolanding-auth-provisioning-state`.
 - Live runtime smoke returned `200`, `ok:true`, `auth.authProfileId:"staff"`, and `auth.enabled:false` through both execute-api and `https://api.zoolandingpage.com.mx`; bad origin `https://evil.example` returned `400`, `Origin is not allowed for requested domain`.
 - Unsigned provisioning-plan and provisioning-executor POSTs returned `403`, `Missing Authentication Token`; OPTIONS for both endpoints returned `200`.
