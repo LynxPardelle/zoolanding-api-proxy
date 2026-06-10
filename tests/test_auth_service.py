@@ -443,6 +443,9 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
             "cognito-idp:DescribeUserPoolClient",
             "cognito-idp:DescribeUserPoolDomain",
             "cognito-idp:ListGroups",
+            "cognito-idp:ListTagsForResource",
+            "cognito-idp:ListUserPoolClients",
+            "cognito-idp:ListUserPools",
             "cognito-idp:UpdateIdentityProvider",
             "cognito-idp:UpdateUserPoolClient",
             "ssm:GetParameter",
@@ -466,6 +469,32 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
             self.assertNotIn(action, executor)
         self.assertIn("AuthProvisioningStateTable", executor)
         self.assertIn("AuthProvisioningSecretParameterPrefix", executor)
+        wildcard_statement = re.search(
+            r"- Effect: Allow\s+Action:\s+(?P<actions>(?:\s+- cognito-idp:[^\n]+\n)+)\s+Resource:\s+'\*'",
+            executor,
+            re.S,
+        )
+        self.assertIsNotNone(wildcard_statement)
+        wildcard_actions = set(re.findall(r"cognito-idp:[A-Za-z]+", wildcard_statement.group("actions")))
+        self.assertEqual(
+            {
+                "cognito-idp:CreateUserPool",
+                "cognito-idp:DescribeUserPoolDomain",
+                "cognito-idp:ListUserPools",
+            },
+            wildcard_actions,
+        )
+        scoped_statement = re.search(
+            r"- Effect: Allow\s+Action:\s+(?P<actions>(?:\s+- cognito-idp:[^\n]+\n)+)\s+Resource:\s+Fn::Sub:\s+arn:aws:cognito-idp:\$\{AWS::Region\}:\$\{AWS::AccountId\}:userpool/\*",
+            executor,
+            re.S,
+        )
+        self.assertIsNotNone(scoped_statement)
+        scoped_actions = set(re.findall(r"cognito-idp:[A-Za-z]+", scoped_statement.group("actions")))
+        self.assertIn("cognito-idp:ListTagsForResource", scoped_actions)
+        self.assertIn("cognito-idp:ListUserPoolClients", scoped_actions)
+        self.assertNotIn("cognito-idp:ListTagsForResource", wildcard_actions)
+        self.assertNotIn("cognito-idp:ListUserPoolClients", wildcard_actions)
         self.assertNotIn("cognito-idp:", api_proxy)
 
 
@@ -700,20 +729,70 @@ class TestAuthServiceProvisioningPlan(unittest.TestCase):
 
 
 class FakeCognitoClient:
-    def __init__(self):
+    def __init__(self, *, user_pools=None, user_pool_clients=None):
         self.calls = []
         self.groups = set()
+        self.user_pools = {}
+        self.user_pool_clients = {}
+        for user_pool in user_pools or []:
+            pool_id = user_pool["Id"]
+            arn = user_pool.get("Arn") or f"arn:aws:cognito-idp:us-east-1:123456789012:userpool/{pool_id}"
+            self.user_pools[pool_id] = {
+                "Id": pool_id,
+                "Name": user_pool["Name"],
+                "Arn": arn,
+                "Tags": dict(user_pool.get("Tags") or {}),
+            }
+        for user_pool_id, clients in (user_pool_clients or {}).items():
+            self.user_pool_clients[user_pool_id] = {}
+            for client in clients:
+                client_id = client["ClientId"]
+                self.user_pool_clients[user_pool_id][client_id] = {
+                    "ClientId": client_id,
+                    "ClientName": client["ClientName"],
+                    **({"ClientSecret": client["ClientSecret"]} if client.get("ClientSecret") else {}),
+                }
 
     def _record(self, name, **kwargs):
         self.calls.append((name, kwargs))
 
     def create_user_pool(self, **kwargs):
         self._record("create_user_pool", **kwargs)
-        return {"UserPool": {"Id": "us-east-1_TESTPOOL"}}
+        pool_id = "us-east-1_TESTPOOL" if "us-east-1_TESTPOOL" not in self.user_pools else f"us-east-1_TESTPOOL{len(self.user_pools) + 1}"
+        arn = f"arn:aws:cognito-idp:us-east-1:123456789012:userpool/{pool_id}"
+        self.user_pools[pool_id] = {
+            "Id": pool_id,
+            "Name": kwargs["PoolName"],
+            "Arn": arn,
+            "Tags": dict(kwargs.get("UserPoolTags") or {}),
+        }
+        return {"UserPool": {"Id": pool_id, "Name": kwargs["PoolName"], "Arn": arn}}
 
     def describe_user_pool(self, **kwargs):
         self._record("describe_user_pool", **kwargs)
-        return {"UserPool": {"Id": kwargs["UserPoolId"]}}
+        user_pool = self.user_pools.get(kwargs["UserPoolId"]) or {
+            "Id": kwargs["UserPoolId"],
+            "Name": "unknown",
+            "Arn": f"arn:aws:cognito-idp:us-east-1:123456789012:userpool/{kwargs['UserPoolId']}",
+            "Tags": {},
+        }
+        return {"UserPool": {key: value for key, value in user_pool.items() if key != "Tags"}}
+
+    def list_user_pools(self, **kwargs):
+        self._record("list_user_pools", **kwargs)
+        return {
+            "UserPools": [
+                {"Id": user_pool["Id"], "Name": user_pool["Name"]}
+                for user_pool in self.user_pools.values()
+            ]
+        }
+
+    def list_tags_for_resource(self, **kwargs):
+        self._record("list_tags_for_resource", **kwargs)
+        for user_pool in self.user_pools.values():
+            if user_pool["Arn"] == kwargs["ResourceArn"]:
+                return {"Tags": dict(user_pool.get("Tags") or {})}
+        return {"Tags": {}}
 
     def describe_user_pool_domain(self, **kwargs):
         self._record("describe_user_pool_domain", **kwargs)
@@ -725,14 +804,37 @@ class FakeCognitoClient:
 
     def create_user_pool_client(self, **kwargs):
         self._record("create_user_pool_client", **kwargs)
-        return {"UserPoolClient": {"ClientId": "public-client-created"}}
+        user_pool_id = kwargs["UserPoolId"]
+        clients = self.user_pool_clients.setdefault(user_pool_id, {})
+        client_id = "public-client-created" if "public-client-created" not in clients else f"public-client-created-{len(clients) + 1}"
+        clients[client_id] = {
+            "ClientId": client_id,
+            "ClientName": kwargs["ClientName"],
+        }
+        return {"UserPoolClient": {"ClientId": client_id, "ClientName": kwargs["ClientName"]}}
 
     def describe_user_pool_client(self, **kwargs):
         self._record("describe_user_pool_client", **kwargs)
-        return {"UserPoolClient": {"ClientId": kwargs["ClientId"]}}
+        client = self.user_pool_clients.get(kwargs["UserPoolId"], {}).get(kwargs["ClientId"]) or {
+            "ClientId": kwargs["ClientId"],
+            "ClientName": "unknown",
+        }
+        return {"UserPoolClient": dict(client)}
+
+    def list_user_pool_clients(self, **kwargs):
+        self._record("list_user_pool_clients", **kwargs)
+        return {
+            "UserPoolClients": [
+                {"ClientId": client["ClientId"], "ClientName": client["ClientName"]}
+                for client in self.user_pool_clients.get(kwargs["UserPoolId"], {}).values()
+            ]
+        }
 
     def update_user_pool_client(self, **kwargs):
         self._record("update_user_pool_client", **kwargs)
+        clients = self.user_pool_clients.setdefault(kwargs["UserPoolId"], {})
+        client = clients.setdefault(kwargs["ClientId"], {"ClientId": kwargs["ClientId"], "ClientName": "unknown"})
+        client["SupportedIdentityProviders"] = kwargs.get("SupportedIdentityProviders")
         return {"UserPoolClient": {"ClientId": kwargs["ClientId"]}}
 
     def list_groups(self, **kwargs):
@@ -758,9 +860,14 @@ class FakeCognitoClient:
 
 
 class FakeDynamoClient:
+    class exceptions:
+        class ConditionalCheckFailedException(Exception):
+            pass
+
     def __init__(self):
         self.items = {}
         self.calls = []
+        self.fail_once_puts = []
 
     def get_item(self, **kwargs):
         self.calls.append(("get_item", kwargs))
@@ -771,8 +878,13 @@ class FakeDynamoClient:
     def put_item(self, **kwargs):
         self.calls.append(("put_item", kwargs))
         key = self._key(kwargs["Item"])
+        self._enforce_condition(kwargs, key)
+        self._maybe_fail_put(kwargs["Item"])
         self.items[key] = kwargs["Item"]
         return {}
+
+    def fail_once_on_put(self, *, operation_id, status):
+        self.fail_once_puts.append((operation_id, status))
 
     def seed_operation(self, plan, operation_id, outputs):
         operation = next(op for op in plan["operations"] if op["operationId"] == operation_id)
@@ -788,6 +900,27 @@ class FakeDynamoClient:
 
     def _key(self, value):
         return (value["pk"]["S"], value["sk"]["S"])
+
+    def _enforce_condition(self, kwargs, key):
+        if "ConditionExpression" not in kwargs or key not in self.items:
+            return
+        current = self.items[key]
+        current_status = (current.get("status") or {}).get("S")
+        lock_expires_at = int((current.get("lockExpiresAt") or {}).get("N") or "0")
+        now = int(((kwargs.get("ExpressionAttributeValues") or {}).get(":now") or {}).get("N") or "0")
+        if current_status == "failed":
+            return
+        if current_status == "in-progress" and lock_expires_at < now:
+            return
+        raise FakeDynamoClient.exceptions.ConditionalCheckFailedException()
+
+    def _maybe_fail_put(self, item):
+        operation_id = (item.get("operationId") or {}).get("S")
+        status = (item.get("status") or {}).get("S")
+        failure = (operation_id, status)
+        if failure in self.fail_once_puts:
+            self.fail_once_puts.remove(failure)
+            raise RuntimeError(f"Injected DynamoDB put failure for {operation_id}:{status}")
 
 
 class FakeSsmClient:
@@ -1011,9 +1144,11 @@ class TestAuthServiceProvisioningExecutor(unittest.TestCase):
         self.assertEqual(
             [call[0] for call in cognito.calls],
             [
+                "list_user_pools",
                 "create_user_pool",
                 "describe_user_pool_domain",
                 "create_user_pool_domain",
+                "list_user_pool_clients",
                 "create_user_pool_client",
                 "list_groups",
                 "create_group",
@@ -1243,6 +1378,130 @@ class TestAuthServiceProvisioningExecutor(unittest.TestCase):
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(payload(response)["error"], "Provisioning executor planKey does not match current plan")
+
+    def test_executor_apply_reconciles_existing_cognito_resources_without_operation_state(self):
+        reset_auth_clients()
+        event, plan = self.apply_event()
+        cognito = FakeCognitoClient(
+            user_pools=[
+                {
+                    "Name": auth._cognito_resource_name(plan, "user-pool"),
+                    "Id": "us-east-1_EXISTING",
+                    "Tags": auth._cognito_resource_tags(plan),
+                }
+            ],
+            user_pool_clients={
+                "us-east-1_EXISTING": [
+                    {
+                        "ClientName": auth._cognito_resource_name(plan, "public-client"),
+                        "ClientId": "existing-public-client",
+                    }
+                ]
+            },
+        )
+        dynamodb = FakeDynamoClient()
+        ssm = FakeSsmClient(fake_social_secret_values())
+        fake_boto3 = FakeBoto3(
+            cognito=cognito,
+            dynamodb=dynamodb,
+            ssm=ssm,
+            secrets=FakeSecretsClient(),
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        actions = [call[0] for call in cognito.calls]
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["executor"]["executionStatus"], "applied")
+        self.assertEqual(body["executor"]["outputs"]["userPoolId"], "us-east-1_EXISTING")
+        self.assertEqual(body["executor"]["outputs"]["clientId"], "existing-public-client")
+        self.assertIn("list_user_pools", actions)
+        self.assertIn("list_user_pool_clients", actions)
+        self.assertNotIn("create_user_pool", actions)
+        self.assertNotIn("create_user_pool_client", actions)
+        self.assertIn("update_user_pool_client", actions)
+
+    def test_executor_apply_retries_user_pool_after_succeeded_state_write_failure_without_duplicate_create(self):
+        reset_auth_clients()
+        event, _plan = self.apply_event()
+        cognito, dynamodb, ssm, fake_boto3 = self.fake_aws()
+        dynamodb.fail_once_on_put(operation_id="ensure-user-pool", status="succeeded")
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            failed_response = auth.auth_lambda_handler(event, Ctx())
+            retry_response = auth.auth_lambda_handler(event, Ctx())
+
+        failed_body = payload(failed_response)
+        retry_body = payload(retry_response)
+        actions = [call[0] for call in cognito.calls]
+        self.assertEqual(failed_response["statusCode"], 500)
+        self.assertEqual(failed_body["executor"]["executionStatus"], "failed")
+        self.assertEqual(retry_response["statusCode"], 200)
+        self.assertEqual(retry_body["executor"]["executionStatus"], "applied")
+        self.assertEqual(actions.count("create_user_pool"), 1)
+        self.assertIn("list_user_pools", actions)
+        self.assertEqual(retry_body["executor"]["outputs"]["userPoolId"], "us-east-1_TESTPOOL")
+        self.assertIn("/zoolanding/auth/tenant-a/planned/google/client-id", [call["Name"] for call in ssm.calls])
+
+    def test_executor_apply_retries_public_client_after_succeeded_state_write_failure_without_duplicate_create(self):
+        reset_auth_clients()
+        event, _plan = self.apply_event()
+        cognito, dynamodb, _ssm, fake_boto3 = self.fake_aws()
+        dynamodb.fail_once_on_put(operation_id="ensure-public-client", status="succeeded")
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            failed_response = auth.auth_lambda_handler(event, Ctx())
+            retry_response = auth.auth_lambda_handler(event, Ctx())
+
+        failed_body = payload(failed_response)
+        retry_body = payload(retry_response)
+        actions = [call[0] for call in cognito.calls]
+        self.assertEqual(failed_response["statusCode"], 500)
+        self.assertEqual(failed_body["executor"]["executionStatus"], "failed")
+        self.assertEqual(retry_response["statusCode"], 200)
+        self.assertEqual(retry_body["executor"]["executionStatus"], "applied")
+        self.assertEqual(actions.count("create_user_pool_client"), 1)
+        self.assertIn("list_user_pool_clients", actions)
+        self.assertEqual(retry_body["executor"]["outputs"]["clientId"], "public-client-created")
+
+    def test_executor_apply_rejects_same_name_user_pool_without_matching_zoolanding_tags(self):
+        reset_auth_clients()
+        event, plan = self.apply_event()
+        cognito = FakeCognitoClient(
+            user_pools=[
+                {
+                    "Name": auth._cognito_resource_name(plan, "user-pool"),
+                    "Id": "us-east-1_FOREIGN",
+                    "Tags": {"managedBy": "other-system"},
+                }
+            ]
+        )
+        dynamodb = FakeDynamoClient()
+        ssm = FakeSsmClient(fake_social_secret_values())
+        fake_boto3 = FakeBoto3(
+            cognito=cognito,
+            dynamodb=dynamodb,
+            ssm=ssm,
+            secrets=FakeSecretsClient(),
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        actions = [call[0] for call in cognito.calls]
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(payload(response)["executor"]["executionStatus"], "failed")
+        self.assertNotIn("create_user_pool", actions)
 
 
 class TestAuthServiceAuthorizer(unittest.TestCase):

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import re
 import hashlib
+import time
 import urllib.parse
 from typing import Any, Dict, Optional
 
@@ -1057,8 +1058,16 @@ def _ensure_cognito_user_pool(plan: Dict[str, Any], operation_outputs: Dict[str,
         _cognito_idp().describe_user_pool(UserPoolId=existing_pool_id)
         return {"userPoolId": existing_pool_id}
 
+    pool_name = _cognito_resource_name(plan, "user-pool")
+    reconciled_pool_id = _find_cognito_user_pool_by_name(plan, pool_name)
+    if reconciled_pool_id:
+        return {
+            "userPoolId": reconciled_pool_id,
+            "issuer": f"https://cognito-idp.{_aws_region()}.amazonaws.com/{reconciled_pool_id}",
+        }
+
     response = _cognito_idp().create_user_pool(
-        PoolName=_cognito_resource_name(plan, "user-pool"),
+        PoolName=pool_name,
         UsernameAttributes=["email"],
         AutoVerifiedAttributes=["email"],
         Schema=[
@@ -1121,14 +1130,21 @@ def _ensure_cognito_public_client(plan: Dict[str, Any], operation_outputs: Dict[
     existing_client_id = str(operation_outputs.get("userPoolClientId") or "").strip()
     supported_providers = _supported_identity_provider_names(plan, include_social=False)
     if existing_client_id:
-        _cognito_idp().describe_user_pool_client(UserPoolId=user_pool_id, ClientId=existing_client_id)
+        _validate_cognito_public_client(user_pool_id, existing_client_id)
         _update_cognito_public_client(plan, user_pool_id, existing_client_id, supported_providers)
         return {"userPoolClientId": existing_client_id, "clientId": existing_client_id}
 
     public_client = (plan.get("runtimeAuth") or {}).get("publicClient") if isinstance(plan.get("runtimeAuth"), dict) else {}
+    client_name = _cognito_resource_name(plan, "public-client")
+    reconciled_client_id = _find_cognito_user_pool_client_by_name(user_pool_id, client_name)
+    if reconciled_client_id:
+        _validate_cognito_public_client(user_pool_id, reconciled_client_id)
+        _update_cognito_public_client(plan, user_pool_id, reconciled_client_id, supported_providers)
+        return {"userPoolClientId": reconciled_client_id, "clientId": reconciled_client_id}
+
     response = _cognito_idp().create_user_pool_client(
         UserPoolId=user_pool_id,
-        ClientName=_cognito_resource_name(plan, "public-client"),
+        ClientName=client_name,
         GenerateSecret=False,
         PreventUserExistenceErrors="ENABLED",
         SupportedIdentityProviders=supported_providers,
@@ -1332,7 +1348,17 @@ def _write_operation_state(
         item["errorType"] = {"S": error_type}
     kwargs: Dict[str, Any] = {"TableName": table_name, "Item": item}
     if status == "in-progress":
-        kwargs["ConditionExpression"] = "attribute_not_exists(pk)"
+        item["lockExpiresAt"] = {"N": str(int(time.time()) + 900)}
+        kwargs["ConditionExpression"] = (
+            "attribute_not_exists(pk) OR #status = :failed OR "
+            "(#status = :inProgress AND lockExpiresAt < :now)"
+        )
+        kwargs["ExpressionAttributeNames"] = {"#status": "status"}
+        kwargs["ExpressionAttributeValues"] = {
+            ":failed": {"S": "failed"},
+            ":inProgress": {"S": "in-progress"},
+            ":now": {"N": str(int(time.time()))},
+        }
     try:
         _dynamodb().put_item(**kwargs)
     except Exception as exc:
@@ -1456,10 +1482,10 @@ def _from_dynamodb_item(item: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(value, dict):
             if "S" in value:
                 parsed[key] = value.get("S")
-            elif "BOOL" in value:
-                parsed[key] = value.get("BOOL")
             elif "N" in value:
                 parsed[key] = value.get("N")
+            elif "BOOL" in value:
+                parsed[key] = value.get("BOOL")
     return parsed
 
 
@@ -1675,6 +1701,70 @@ def _list_cognito_groups(user_pool_id: str) -> set[str]:
         if not token:
             return groups
         kwargs["NextToken"] = token
+
+
+def _find_cognito_user_pool_by_name(plan: Dict[str, Any], pool_name: str) -> str:
+    matches: list[str] = []
+    kwargs: Dict[str, Any] = {"MaxResults": 60}
+    while True:
+        response = _cognito_idp().list_user_pools(**kwargs)
+        for user_pool in response.get("UserPools") or []:
+            if str(user_pool.get("Name") or "") == pool_name:
+                pool_id = str(user_pool.get("Id") or "").strip()
+                if pool_id:
+                    matches.append(pool_id)
+        token = response.get("NextToken")
+        if not token:
+            break
+        kwargs["NextToken"] = token
+
+    if len(matches) > 1:
+        raise AuthServiceError("Multiple Cognito user pools match the planned name")
+    if not matches:
+        return ""
+    _validate_cognito_user_pool_tags(plan, matches[0])
+    return matches[0]
+
+
+def _validate_cognito_user_pool_tags(plan: Dict[str, Any], user_pool_id: str) -> None:
+    response = _cognito_idp().describe_user_pool(UserPoolId=user_pool_id)
+    user_pool = response.get("UserPool") if isinstance(response, dict) else {}
+    arn = str((user_pool or {}).get("Arn") or "").strip()
+    if not arn:
+        raise AuthServiceError("Cognito user pool cannot be reconciled without an ARN")
+    tags_response = _cognito_idp().list_tags_for_resource(ResourceArn=arn)
+    actual_tags = tags_response.get("Tags") if isinstance(tags_response, dict) else {}
+    expected_tags = _cognito_resource_tags(plan)
+    for key in ("managedBy", "domain", "tenantId", "authProfileId"):
+        if str((actual_tags or {}).get(key) or "") != expected_tags[key]:
+            raise AuthServiceError("Cognito user pool name is already used outside this auth profile")
+
+
+def _find_cognito_user_pool_client_by_name(user_pool_id: str, client_name: str) -> str:
+    matches: list[str] = []
+    kwargs: Dict[str, Any] = {"UserPoolId": user_pool_id, "MaxResults": 60}
+    while True:
+        response = _cognito_idp().list_user_pool_clients(**kwargs)
+        for client in response.get("UserPoolClients") or []:
+            if str(client.get("ClientName") or "") == client_name:
+                client_id = str(client.get("ClientId") or "").strip()
+                if client_id:
+                    matches.append(client_id)
+        token = response.get("NextToken")
+        if not token:
+            break
+        kwargs["NextToken"] = token
+
+    if len(matches) > 1:
+        raise AuthServiceError("Multiple Cognito app clients match the planned name")
+    return matches[0] if matches else ""
+
+
+def _validate_cognito_public_client(user_pool_id: str, client_id: str) -> None:
+    response = _cognito_idp().describe_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id)
+    user_pool_client = response.get("UserPoolClient") if isinstance(response, dict) else {}
+    if str((user_pool_client or {}).get("ClientSecret") or "").strip():
+        raise AuthServiceError("Existing Cognito app client is not public")
 
 
 def _supported_identity_provider_names(plan: Dict[str, Any], *, include_social: bool) -> list[str]:

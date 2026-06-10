@@ -271,19 +271,26 @@ Resources:
                 Fn::Sub: arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AuthProvisioningSecretNamePrefix}*
             - Effect: Allow
               Action:
+                - cognito-idp:CreateUserPool
+                - cognito-idp:DescribeUserPoolDomain
+                - cognito-idp:ListUserPools
+              Resource: '*'
+            - Effect: Allow
+              Action:
                 - cognito-idp:CreateGroup
                 - cognito-idp:CreateIdentityProvider
-                - cognito-idp:CreateUserPool
                 - cognito-idp:CreateUserPoolClient
                 - cognito-idp:CreateUserPoolDomain
                 - cognito-idp:DescribeIdentityProvider
                 - cognito-idp:DescribeUserPool
                 - cognito-idp:DescribeUserPoolClient
-                - cognito-idp:DescribeUserPoolDomain
                 - cognito-idp:ListGroups
+                - cognito-idp:ListTagsForResource
+                - cognito-idp:ListUserPoolClients
                 - cognito-idp:UpdateIdentityProvider
                 - cognito-idp:UpdateUserPoolClient
-              Resource: '*'
+              Resource:
+                Fn::Sub: arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
       Events:
         AuthProvisioningExecutorPost:
           Type: Api

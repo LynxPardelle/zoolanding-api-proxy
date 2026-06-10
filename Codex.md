@@ -108,3 +108,11 @@
 - SAM grants Cognito and auth provisioning SSM/Secrets permissions only to `AuthProvisioningExecutorFunction`; `ApiProxyFunction` keeps its existing SSM read for upstream API credentials and also gets state-table `dynamodb:GetItem` for effective auth state.
 - Subagent security review returned NO-GO for creating real Cognito yet. The remaining live blockers are real Zoosite social IdP secret refs in AWS, final apply domain/tenant allowlists, and an explicitly approved deploy with `AUTH_PROVISIONING_APPLY_ENABLED=true`.
 - Verification at 2026-06-09 21:04 CT: `python -m unittest tests.test_auth_service` ran 47 tests OK; `python -m unittest discover -s tests -p "test_*.py"` ran 79 tests OK; `sam validate --lint` reported the template is valid; `sam build --no-cached` succeeded; `pip-audit -r requirements.txt` reported no known vulnerabilities; high-signal diff secret scan reported `NO_HIGH_CONFIDENCE_SECRET_MATCHES`.
+
+## 2026-06-09 22:32 CT - Cognito Apply Reconciliation
+
+- Closed the apply idempotency blocker found in review: the executor now lists Cognito user pools by deterministic name, verifies Zoolanding ownership tags, and only creates when no owned match exists.
+- Public app clients are now listed by deterministic name inside the reconciled user pool before creation; matched clients are described, verified public, and updated instead of duplicated.
+- Same-name user pools without matching `managedBy`, `domain`, `tenantId`, and `authProfileId` tags fail closed instead of being adopted.
+- Operation state writes now allow retry from `failed` for the same idempotency path, while `succeeded` remains terminal. Local tests cover user pool and public app client retries after DynamoDB `succeeded` write failures.
+- No deploy, no AWS calls, no real Cognito resources, no social IdP secrets, and no tokens were created in this reconciliation step.
