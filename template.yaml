@@ -31,6 +31,15 @@ Parameters:
     Type: String
     Default: ''
     Description: Comma-separated IAM role ARNs allowed to read plan-only auth provisioning plans.
+  AuthProvisioningStateTableName:
+    Type: String
+    Default: zoolanding-auth-provisioning-state
+    Description: DynamoDB table for auth provisioning state and audit records.
+  AuthProvisioningApplyEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: Guardrail flag for future real Cognito apply. Keep false until explicitly approved.
   LogLevel:
     Type: String
     Default: INFO
@@ -156,6 +165,74 @@ Resources:
               Ref: ApiProxyApi
             Path: /auth/provisioning-plan
             Method: OPTIONS
+
+  AuthProvisioningStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Ref: AuthProvisioningStateTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  AuthProvisioningExecutorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: auth_service.auth_lambda_handler
+      Description: Server-only auth provisioning executor boundary. Apply remains guarded by feature flag.
+      Environment:
+        Variables:
+          CONFIG_TABLE_NAME:
+            Ref: ConfigTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          ALLOWED_CORS_ORIGINS:
+            Ref: AllowedCorsOrigins
+          AUTH_REGISTRY_FILE_NAME:
+            Ref: AuthRegistryFileName
+          AUTH_PROVISIONING_ALLOWED_ROLE_NAMES:
+            Ref: AuthProvisioningAllowedRoleNames
+          AUTH_PROVISIONING_ALLOWED_ROLE_ARNS:
+            Ref: AuthProvisioningAllowedRoleArns
+          AUTH_PROVISIONING_STATE_TABLE_NAME:
+            Ref: AuthProvisioningStateTableName
+          AUTH_PROVISIONING_APPLY_ENABLED:
+            Ref: AuthProvisioningApplyEnabled
+          LOG_LEVEL:
+            Ref: LogLevel
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigTableName}
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/*
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+              Resource:
+                Fn::GetAtt:
+                  - AuthProvisioningStateTable
+                  - Arn
+      Events:
         AuthProvisioningExecutorPost:
           Type: Api
           Properties:
@@ -228,6 +305,14 @@ Outputs:
     Description: Server-only dry-run Cognito provisioning executor endpoint URL.
     Value:
       Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/auth/provisioning-executor
+  AuthProvisioningExecutorFunctionName:
+    Description: Server-only auth provisioning executor Lambda function name.
+    Value:
+      Ref: AuthProvisioningExecutorFunction
+  AuthProvisioningStateTableName:
+    Description: DynamoDB table name for auth provisioning state and audit records.
+    Value:
+      Ref: AuthProvisioningStateTable
   FunctionName:
     Description: Deployed Lambda function name.
     Value:

@@ -357,6 +357,22 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
             ),
         )
 
+    def test_provisioning_executor_uses_separate_lambda_and_state_table_without_cognito_writes(self):
+        with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
+            template = template_file.read()
+
+        self.assertIn("AuthProvisioningStateTable:", template)
+        self.assertRegex(
+            template,
+            re.compile(
+                r"AuthProvisioningExecutorFunction:.*?Handler:\s*auth_service\.auth_lambda_handler"
+                r".*?AUTH_PROVISIONING_STATE_TABLE_NAME:"
+                r".*?AuthProvisioningExecutorPost:.*?Authorizer:\s*AWS_IAM",
+                re.S,
+            ),
+        )
+        self.assertNotIn("cognito-idp:", template)
+
 
 class TestAuthServiceProvisioningPlan(unittest.TestCase):
     def test_provisioning_plan_is_denied_by_default(self):
@@ -416,10 +432,11 @@ class TestAuthServiceProvisioningPlan(unittest.TestCase):
         repeated_body = payload(repeated_response)
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(body["plan"]["mode"], "plan-only")
-        self.assertEqual(body["plan"]["planVersion"], "2026-06-09.v1")
+        self.assertEqual(body["plan"]["planVersion"], "2026-06-10.v1")
         self.assertEqual(body["plan"]["provider"], "cognito")
         self.assertEqual(body["plan"]["tenantId"], "tenant-a")
         self.assertEqual(body["plan"]["authProfileId"], "planned")
+        self.assertRegex(body["plan"]["configHash"], r"^[0-9a-f]{64}$")
         self.assertFalse(body["plan"]["runtimeAuth"]["currentEnabled"])
         self.assertEqual(body["plan"]["lifecycle"]["executorAction"], "prepare-provisioning")
         self.assertEqual(body["plan"]["lifecycle"]["expectedFinalStatus"], "active")
@@ -429,6 +446,7 @@ class TestAuthServiceProvisioningPlan(unittest.TestCase):
             "cognito:example.test:planned:ensure-user-pool",
         )
         self.assertEqual(body["plan"]["planKey"], repeated_body["plan"]["planKey"])
+        self.assertEqual(body["plan"]["configHash"], repeated_body["plan"]["configHash"])
         self.assertEqual(
             body["plan"]["operations"][0]["idempotencyKey"],
             repeated_body["plan"]["operations"][0]["idempotencyKey"],
@@ -443,6 +461,80 @@ class TestAuthServiceProvisioningPlan(unittest.TestCase):
         self.assertNotIn("clientSecretValue", json.dumps(body))
         self.assertNotIn("refreshToken", json.dumps(body))
         self.assertNotIn("must-not-pass", json.dumps(body))
+
+    def test_plan_key_and_operation_idempotency_change_with_sanitized_config(self):
+        registry = active_registry()
+        changed_registry = active_registry()
+        changed_registry["profiles"][1]["callbackUrls"] = ["https://example.test/changed/auth/callback"]
+        event = api_event(
+            "/auth/provisioning-plan",
+            {"domain": "example.test", "authProfileId": "planned"},
+            request_context={
+                "identity": {
+                    "userArn": "arn:aws:sts::123456789012:assumed-role/zoolanding-auth-planner/session"
+                }
+            },
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=changed_registry), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            changed_response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)["plan"]
+        changed_body = payload(changed_response)["plan"]
+        self.assertNotEqual(body["configHash"], changed_body["configHash"])
+        self.assertNotEqual(body["planKey"], changed_body["planKey"])
+        self.assertNotEqual(body["operations"][0]["idempotencyKey"], changed_body["operations"][0]["idempotencyKey"])
+
+    def test_planned_profile_can_be_planned_before_real_cognito_client_id_exists(self):
+        registry = active_registry()
+        planned = registry["profiles"][1]
+        planned.pop("clientId", None)
+        planned.pop("audiences", None)
+        planned["desiredClientAlias"] = "staff-web"
+        event = api_event(
+            "/auth/provisioning-plan",
+            {"domain": "example.test", "authProfileId": "planned"},
+            request_context={
+                "identity": {
+                    "userArn": "arn:aws:sts::123456789012:assumed-role/zoolanding-auth-planner/session"
+                }
+            },
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["plan"]["runtimeAuth"]["publicClient"]["clientId"], "staff-web")
+        self.assertEqual(body["plan"]["runtimeAuth"]["publicClient"]["audiences"], [])
+
+    def test_active_profile_still_requires_real_audience_or_client_id(self):
+        registry = active_registry()
+        active = registry["profiles"][0]
+        active.pop("clientId", None)
+        active.pop("audiences", None)
+        event = api_event(
+            "/auth/provisioning-plan",
+            {"domain": "example.test", "authProfileId": "staff"},
+            request_context={
+                "identity": {
+                    "userArn": "arn:aws:sts::123456789012:assumed-role/zoolanding-auth-planner/session"
+                }
+            },
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(payload(response)["error"], "Provisioning plan requires an audience/clientId")
 
     def test_provisioning_status_returns_resumable_plan(self):
         event = api_event(

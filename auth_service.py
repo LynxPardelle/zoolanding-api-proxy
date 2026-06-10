@@ -39,8 +39,8 @@ _AUTH_REQUEST_ORIGIN = None
 
 AUTH_PATHS = {"/auth/runtime-config", "/auth/provisioning-plan", "/auth/provisioning-executor"}
 AUTH_PROFILE_STATUSES = {"active", "planned", "provisioning", "suspended", "failed"}
-AUTH_PROVISIONING_PLAN_SCHEMA_VERSION = "2026-06-09.v1"
-AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION = "2026-06-09.executor.v1"
+AUTH_PROVISIONING_PLAN_SCHEMA_VERSION = "2026-06-10.v1"
+AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION = "2026-06-10.executor.v1"
 TEST_PREVIEW_ORIGIN_HOST = "test.zoolandingpage.com.mx"
 CONTROL_OR_WHITESPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 RAW_SECRET_KEY_RE = re.compile(r"(secret|token|password|private[_-]?key|credential|api[_-]?key)", re.I)
@@ -445,6 +445,13 @@ def _public_runtime_auth(profile: Dict[str, Any], *, enabled: bool = True) -> Di
     issuer = str(profile.get("issuer") or "").strip()
     audiences = _audiences(profile)
     client_id = str(profile.get("clientId") or (audiences[0] if audiences else "")).strip()
+    if not client_id and not enabled:
+        client_id = str(
+            profile.get("desiredClientId")
+            or profile.get("desiredClientAlias")
+            or profile.get("clientAlias")
+            or "pending-cognito-client-id"
+        ).strip()
     if not client_id:
         raise AuthRegistryError("Auth profile requires clientId")
     auth_payload = {
@@ -538,18 +545,25 @@ def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
     lifecycle = _plan_lifecycle(status)
     public_runtime_auth = _public_runtime_auth(profile, enabled=status == "active")
     social_identity_providers = _social_identity_providers(profile)
+    config_hash = _provisioning_config_hash(
+        domain=normalized_domain,
+        profile=profile,
+        social_identity_providers=social_identity_providers,
+    )
     operations = _provisioning_operations(
         domain=normalized_domain,
         auth_profile_id=auth_profile_id,
         tenant_id=str(profile.get("tenantId") or "").strip(),
         status=status,
         social_identity_providers=social_identity_providers,
+        config_hash=config_hash,
     )
-    plan_key = _stable_key("plan", AUTH_PROVISIONING_PLAN_SCHEMA_VERSION, normalized_domain, auth_profile_id, status)
+    plan_key = _stable_key("plan", AUTH_PROVISIONING_PLAN_SCHEMA_VERSION, config_hash)
     return {
         "mode": "plan-only",
         "planVersion": AUTH_PROVISIONING_PLAN_SCHEMA_VERSION,
         "planKey": plan_key,
+        "configHash": config_hash,
         "provider": "cognito",
         "domain": normalized_domain,
         "authProfileId": auth_profile_id,
@@ -668,6 +682,74 @@ def _claims_match_audience(claims: Dict[str, Any], audiences: list[str]) -> bool
     return bool(expected.intersection(actual))
 
 
+def _provisioning_config_hash(
+    *,
+    domain: str,
+    profile: Dict[str, Any],
+    social_identity_providers: list[Dict[str, Any]],
+) -> str:
+    sanitized = {
+        "domain": normalize_domain(domain),
+        "authProfileId": _profile_id(profile),
+        "tenantId": str(profile.get("tenantId") or "").strip(),
+        "status": _profile_status(profile),
+        "issuer": str(profile.get("issuer") or "").strip(),
+        "hostedUi": _hosted_ui_details(profile),
+        "runtimePaths": {
+            "redirectPath": _runtime_path_from_profile(profile, "redirectPath", "callbackUrls", "redirectPath"),
+            "logoutPath": _runtime_path_from_profile(profile, "logoutPath", "logoutUrls", "logoutPath"),
+            "loginPath": str(profile.get("loginPath") or "/login").strip(),
+            "postLoginPath": str(profile.get("postLoginPath") or "").strip(),
+            "postLogoutPath": str(profile.get("postLogoutPath") or "").strip(),
+        },
+        "publicClient": {
+            "desiredClientId": str(profile.get("clientId") or profile.get("desiredClientId") or "").strip(),
+            "desiredClientAlias": str(profile.get("desiredClientAlias") or profile.get("clientAlias") or "").strip(),
+            "audiences": _audiences(profile),
+            "scopes": _string_list(profile.get("scopes")) or ["openid", "email", "profile"],
+            "callbackUrls": sorted(_string_list(profile.get("callbackUrls"))),
+            "logoutUrls": sorted(_string_list(profile.get("logoutUrls"))),
+        },
+        "groups": {
+            "claim": str(profile.get("groupClaim") or "cognito:groups").strip(),
+            "allowed": sorted(_string_list(profile.get("allowedGroups"))),
+        },
+        "jwtAuthorizer": {
+            "tenantClaim": str(profile.get("tenantClaim") or "custom:tenant_id").strip(),
+        },
+        "socialIdentityProviders": _hashable_social_identity_providers(social_identity_providers),
+    }
+    return _stable_json_hash(sanitized)
+
+
+def _hashable_social_identity_providers(providers: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    hashable = []
+    for provider in providers:
+        secret_refs = provider.get("secretRefs") if isinstance(provider.get("secretRefs"), dict) else {}
+        entry = {
+            "providerId": str(provider.get("providerId") or "").strip(),
+            "providerType": str(provider.get("providerType") or "").strip(),
+            "scopes": sorted(_string_list(provider.get("scopes"))),
+            "metadata": {
+                key: str(provider.get(key) or "").strip()
+                for key in ("issuer", "discoveryUrl", "authorizeUrl", "tokenUrl", "userInfoUrl", "jwksUrl")
+                if str(provider.get(key) or "").strip()
+            },
+            "secretRefHashes": {
+                key: _stable_key("secret-ref", str(value))
+                for key, value in sorted(secret_refs.items())
+                if str(value or "").strip()
+            },
+        }
+        hashable.append(entry)
+    return sorted(hashable, key=lambda entry: (entry["providerId"], entry["providerType"]))
+
+
+def _stable_json_hash(value: Any) -> str:
+    serialized = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _reject_unsupported_runtime_options(payload: Dict[str, Any]) -> None:
     if not all(str(key) in RUNTIME_CONFIG_ALLOWED_KEYS for key in payload.keys()):
         raise AuthServiceError("Unsupported auth runtime option")
@@ -702,6 +784,7 @@ def _executor_idempotency_key(plan: Dict[str, Any], mode: str, requested_idempot
         AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION,
         str(plan.get("planVersion") or ""),
         str(plan.get("planKey") or ""),
+        str(plan.get("configHash") or ""),
         mode,
     )
     requested = str(requested_idempotency_key or "").strip()
@@ -736,6 +819,7 @@ def _cognito_executor_preview(
         "mode": mode,
         "executionStatus": execution_status,
         "planKey": str(plan.get("planKey") or ""),
+        "configHash": str(plan.get("configHash") or ""),
         "idempotencyKey": idempotency_key,
         "domain": str(plan.get("domain") or ""),
         "authProfileId": str(plan.get("authProfileId") or ""),
@@ -749,6 +833,7 @@ def _cognito_executor_preview(
         "executionStatus": execution_status,
         "planVersion": str(plan.get("planVersion") or ""),
         "planKey": str(plan.get("planKey") or ""),
+        "configHash": str(plan.get("configHash") or ""),
         "idempotencyKey": idempotency_key,
         "target": {
             "domain": str(plan.get("domain") or ""),
@@ -933,7 +1018,7 @@ def _validate_provisioning_profile(profile: Dict[str, Any]) -> None:
     _runtime_path_from_profile(profile, "redirectPath", "callbackUrls", "redirectPath")
     _runtime_path_from_profile(profile, "logoutPath", "logoutUrls", "logoutPath")
     _validate_same_origin_path(str(profile.get("loginPath") or "/login"), "loginPath")
-    if not _audiences(profile):
+    if status == "active" and not _audiences(profile):
         raise AuthRegistryError("Provisioning plan requires an audience/clientId")
     for callback_url in _string_list(profile.get("callbackUrls")):
         _validate_https_url(callback_url, "callbackUrl")
@@ -1085,6 +1170,7 @@ def _provisioning_operations(
     tenant_id: str,
     status: str,
     social_identity_providers: list[Dict[str, Any]],
+    config_hash: str,
 ) -> list[Dict[str, Any]]:
     if status == "active":
         return []
@@ -1097,6 +1183,7 @@ def _provisioning_operations(
             auth_profile_id=auth_profile_id,
             tenant_id=tenant_id,
             status=status,
+            config_hash=config_hash,
             operation_id="ensure-user-pool",
             stage="identity-core",
             expected_status_after_completion="provisioning",
@@ -1106,6 +1193,7 @@ def _provisioning_operations(
             auth_profile_id=auth_profile_id,
             tenant_id=tenant_id,
             status=status,
+            config_hash=config_hash,
             operation_id="ensure-hosted-ui-domain",
             stage="hosted-ui",
             expected_status_after_completion="provisioning",
@@ -1116,6 +1204,7 @@ def _provisioning_operations(
             auth_profile_id=auth_profile_id,
             tenant_id=tenant_id,
             status=status,
+            config_hash=config_hash,
             operation_id="ensure-public-client",
             stage="public-client",
             expected_status_after_completion="provisioning",
@@ -1126,6 +1215,7 @@ def _provisioning_operations(
             auth_profile_id=auth_profile_id,
             tenant_id=tenant_id,
             status=status,
+            config_hash=config_hash,
             operation_id="ensure-user-groups",
             stage="groups",
             expected_status_after_completion="provisioning",
@@ -1139,6 +1229,7 @@ def _provisioning_operations(
                 auth_profile_id=auth_profile_id,
                 tenant_id=tenant_id,
                 status=status,
+                config_hash=config_hash,
                 operation_id="ensure-social-identity-providers",
                 stage="social-idps",
                 expected_status_after_completion="provisioning",
@@ -1151,6 +1242,7 @@ def _provisioning_operations(
             auth_profile_id=auth_profile_id,
             tenant_id=tenant_id,
             status=status,
+            config_hash=config_hash,
             operation_id="finalize-runtime-activation",
             stage="finalize",
             expected_status_after_completion="active",
@@ -1166,6 +1258,7 @@ def _plan_operation(
     auth_profile_id: str,
     tenant_id: str,
     status: str,
+    config_hash: str,
     operation_id: str,
     stage: str,
     expected_status_after_completion: str,
@@ -1183,6 +1276,7 @@ def _plan_operation(
             tenant_id,
             status,
             operation_id,
+            config_hash,
         ),
         "stage": stage,
         "expectedStatusAfterCompletion": expected_status_after_completion,

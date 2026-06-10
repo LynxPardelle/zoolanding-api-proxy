@@ -76,7 +76,7 @@ Inactive profiles return the same public shape with `enabled: false`; profile st
 
 `/auth/provisioning-plan` is server-only. It is denied unless the API Gateway/Lambda request context contains a signed IAM role ARN whose role name or ARN is allowlisted by environment configuration.
 
-Provisioning-plan requests accept only `domain` and `authProfileId`. The response is versioned and deterministic so a future executor can resume safely without inventing new identifiers: it includes `planVersion`, `planKey`, lifecycle state, runtime public-client config, hosted UI details, expected post-activation outputs, normalized social IdP references, and per-operation `operationKey` plus `idempotencyKey` values. `planned` and `provisioning` return resumable operations toward `active`; `active` returns an explicit noop plan; `suspended` and `failed` return explicit manual-review plans. Social IdPs stay reference-only; no secret values are resolved or echoed.
+Provisioning-plan requests accept only `domain` and `authProfileId`. The response is versioned and deterministic so a future executor can resume safely without inventing new identifiers: it includes `planVersion`, `planKey`, sanitized `configHash`, lifecycle state, runtime public-client config, hosted UI details, expected post-activation outputs, normalized social IdP references, and per-operation `operationKey` plus `idempotencyKey` values. `planKey` and operation idempotency are bound to the sanitized desired config. `planned` and `provisioning` return resumable operations toward `active`; `active` returns an explicit noop plan; `suspended` and `failed` return explicit manual-review plans. Social IdPs stay reference-only; no secret values are resolved or echoed.
 
 `POST /auth/provisioning-executor`
 
@@ -90,7 +90,7 @@ Provisioning-plan requests accept only `domain` and `authProfileId`. The respons
 }
 ```
 
-`/auth/provisioning-executor` is server-only and must stay IAM-authorized. Requests accept only `domain`, `authProfileId`, `mode`, optional `planKey`, and optional `idempotencyKey`. `dry-run` regenerates and validates the current plan, returns sanitized operation previews and a deterministic audit event, and does not perform AWS writes, call Cognito, or create/update/delete resources; it may read the server-only registry from the configured local or deployed sources. `apply` is explicit but fails closed with manual review required; it is not implemented and must not create Cognito resources until a future approved deploy/provisioning pass.
+`/auth/provisioning-executor` is server-only, must stay IAM-authorized, and is deployed on a separate Lambda boundary from the public proxy/runtime handler. Requests accept only `domain`, `authProfileId`, `mode`, optional `planKey`, and optional `idempotencyKey`. `dry-run` regenerates and validates the current plan, returns sanitized operation previews and a deterministic audit event, and does not perform AWS writes, call Cognito, or create/update/delete resources; it may read the server-only registry from the configured local or deployed sources. `apply` is explicit but fails closed with manual review required; it is not implemented and must not create Cognito resources until a future approved deploy/provisioning pass.
 
 ## Server-Only Policy
 

@@ -79,3 +79,12 @@
 - Live signed IAM smoke verified with an exact allowlisted caller: `POST /auth/provisioning-plan` returns `200`, `mode:"plan-only"`, `status:"planned"`, and six operations; executor `mode:"dry-run"` returns `200`, `executionStatus:"preview-only"`, six operations, and no `secretRefs`; executor `mode:"apply"` returns `501`, `manual-review-required`, and zero operations.
 - Live custom-domain smoke through `https://api.zoolandingpage.com.mx` verified: Zoosite runtime-config returns `200` with `auth.enabled:false`, `OPTIONS /auth/provisioning-executor` returns `200`, and unsigned `POST /auth/provisioning-executor` returns `403 Missing Authentication Token`.
 - No Cognito user pools, app clients, Hosted UI domains, Google/Facebook IdPs, users, groups, or other Cognito resources were created. The deployed executor still keeps real apply closed with `501/manual-review-required`.
+
+## 2026-06-09 20:00 CT - Auth Apply Readiness Boundary
+
+- The next real Cognito apply step is not ready to mutate Cognito until the executor can bind idempotency to the full desired config, persist state/audit, and run behind a separate Lambda/role from the public proxy/runtime handler.
+- Provisioning plans now use contract version `2026-06-10.v1` and include a sanitized `configHash`. `planKey` and per-operation idempotency are bound to that hash, so callback/logout URLs, groups, Hosted UI config, scopes, and social IdP reference changes create a new plan.
+- Planned/provisioning profiles can now be planned before the real Cognito app client ID exists. Active profiles still require a real audience/clientId.
+- The SAM template now separates `/auth/provisioning-executor` onto `AuthProvisioningExecutorFunction` and adds `AuthProvisioningStateTable` for future provisioning state/audit records. No Cognito write permissions are granted in this readiness step.
+- Real Cognito resources should still not be created until a future apply implementation passes Cognito-specific tests and the social IdP secret preflight is ready.
+- Verification at 2026-06-09 20:05 CT: `python -m unittest discover -s tests -p "test_*.py"` ran 69 tests OK; `sam validate --lint` reported the template is valid; `sam build --no-cached` succeeded; `pip-audit -r requirements.txt` reported no known vulnerabilities; the high-signal diff secret scan reported `NO_HIGH_CONFIDENCE_SECRET_MATCHES`.
