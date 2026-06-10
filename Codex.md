@@ -131,6 +131,15 @@
 - Zoosite social IdP refs were removed in the draft, so the live provisioning plan for `zoositioweb.com.mx` / `staff` now has five Cognito-native operations, `socialIdentityProviderCount:0`, and no Google/Facebook/secret-ref material.
 - First real apply attempt failed before creating the user pool: executor response reported `ensure-user-pool` failed with `AccessDeniedException`; CloudTrail for `CreateUserPool` reported missing `cognito-idp:TagResource` on `arn:aws:cognito-idp:us-east-1:765932874577:userpool/*`.
 - `template.yaml` now includes `cognito-idp:TagResource` in the executor user-pool-scoped Cognito permissions because `CreateUserPool` with `UserPoolTags` requires that tagging permission.
+
+## 2026-06-10 02:08 CT - Zoosite Cognito-native auth activated
+
+- Deployed the `TagResource` IAM fix after `sam build`; the executor role update completed without replacement. Then signed executor `mode:"apply"` for `zoositioweb.com.mx` / `staff` returned `200`, `ok:true`, `executionStatus:"applied"`, and five succeeded operations: `ensure-user-pool`, `ensure-hosted-ui-domain`, `ensure-public-client`, `ensure-user-groups`, and `finalize-runtime-activation`.
+- Real Cognito resources now exist in `us-east-1`: user pool `us-east-1_Pq5OCadbK`, public app client `16jb6ml9q5jdh6blj7f668fajp`, Hosted UI `https://zoosite-staff-planned.auth.us-east-1.amazoncognito.com`, and groups `zoosite-admin` / `zoosite-client`.
+- Verified app client has no `ClientSecret`, supports only `COGNITO`, OAuth code flow, scopes `email`, `openid`, `profile`, and callback/logout URLs for `zoositioweb.com.mx` plus `zoositioweb.com`.
+- After apply, redeployed `AuthProvisioningApplyEnabled=false`; stack parameter now reports `false`, and a signed apply attempt returns `501` with `blockedReason:"apply-disabled"` and zero operations.
+- Runtime `POST https://api.zoolandingpage.com.mx/auth/runtime-config` from origin `https://zoositioweb.com.mx` returns `auth.enabled:true`, issuer `https://cognito-idp.us-east-1.amazonaws.com/us-east-1_Pq5OCadbK`, clientId `16jb6ml9q5jdh6blj7f668fajp`, no Google/Facebook refs, and no secret material.
+- Production QA: `/acceso` and `/auth/callback` render `<main>`; `/mi-cuenta` redirects unauthenticated users to `/acceso`; Hosted UI login returns `200` with password fields and no Google/Facebook text in desktop/mobile Edge headless.
 - Signed executor apply with apply disabled returned `501`, `error:"Cognito executor apply is disabled"`, `blockedReason:"apply-disabled"`, zero operations, `mutationAttempted:false`, and no secret refs or client secret.
 - Read-only Cognito verification returned `[]` for user pools containing `zoosite` or `zoolanding`; no real Cognito resources were created.
 - Current blocker for real apply: the live plan has Google and Facebook provider refs, but both provider credential refs are missing in AWS. Real apply must stay disabled until those real IdP credentials exist and pass non-placeholder preflight.
