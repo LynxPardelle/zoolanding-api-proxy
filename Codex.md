@@ -125,6 +125,12 @@
 - Live runtime smoke returned `200`, `ok:true`, `auth.authProfileId:"staff"`, and `auth.enabled:false` through both execute-api and `https://api.zoolandingpage.com.mx`; bad origin `https://evil.example` returned `400`, `Origin is not allowed for requested domain`.
 - Unsigned provisioning-plan and provisioning-executor POSTs returned `403`, `Missing Authentication Token`; OPTIONS for both endpoints returned `200`.
 - Signed provisioning-plan returned `200`, `mode:"plan-only"`, `status:"planned"`, six operations, and config hash `a047d17beea7650d5a003919aceaa09e0ebc9dbd0ab2b502ce03e892e05a64cd`. Signed executor dry-run returned `200`, `executionStatus:"preview-only"`, six operations, `mutationAttempted:false`, no `secretRefs`, no `clientSecret`, and no auth ref prefix in the response.
+
+## 2026-06-10 01:59 CT - Cognito apply permission fix
+
+- Zoosite social IdP refs were removed in the draft, so the live provisioning plan for `zoositioweb.com.mx` / `staff` now has five Cognito-native operations, `socialIdentityProviderCount:0`, and no Google/Facebook/secret-ref material.
+- First real apply attempt failed before creating the user pool: executor response reported `ensure-user-pool` failed with `AccessDeniedException`; CloudTrail for `CreateUserPool` reported missing `cognito-idp:TagResource` on `arn:aws:cognito-idp:us-east-1:765932874577:userpool/*`.
+- `template.yaml` now includes `cognito-idp:TagResource` in the executor user-pool-scoped Cognito permissions because `CreateUserPool` with `UserPoolTags` requires that tagging permission.
 - Signed executor apply with apply disabled returned `501`, `error:"Cognito executor apply is disabled"`, `blockedReason:"apply-disabled"`, zero operations, `mutationAttempted:false`, and no secret refs or client secret.
 - Read-only Cognito verification returned `[]` for user pools containing `zoosite` or `zoolanding`; no real Cognito resources were created.
 - Current blocker for real apply: the live plan has Google and Facebook provider refs, but both provider credential refs are missing in AWS. Real apply must stay disabled until those real IdP credentials exist and pass non-placeholder preflight.

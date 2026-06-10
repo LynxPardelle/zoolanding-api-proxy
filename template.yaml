@@ -287,6 +287,7 @@ Resources:
                 - cognito-idp:ListGroups
                 - cognito-idp:ListTagsForResource
                 - cognito-idp:ListUserPoolClients
+                - cognito-idp:TagResource
                 - cognito-idp:UpdateIdentityProvider
                 - cognito-idp:UpdateUserPoolClient
               Resource:
