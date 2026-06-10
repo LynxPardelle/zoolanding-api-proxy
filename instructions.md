@@ -76,7 +76,7 @@ Inactive profiles return the same public shape with `enabled: false`; profile st
 
 `/auth/provisioning-plan` is server-only. It is denied unless the API Gateway/Lambda request context contains a signed IAM role ARN whose role name or ARN is allowlisted by environment configuration.
 
-Provisioning-plan requests accept only `domain` and `authProfileId`. The response is versioned and deterministic so a future executor can resume safely without inventing new identifiers: it includes `planVersion`, `planKey`, sanitized `configHash`, lifecycle state, runtime public-client config, hosted UI details, expected post-activation outputs, normalized social IdP references, and per-operation `operationKey` plus `idempotencyKey` values. `planKey` and operation idempotency are bound to the sanitized desired config. `planned` and `provisioning` return resumable operations toward `active`; `active` returns an explicit noop plan; `suspended` and `failed` return explicit manual-review plans. Social IdPs stay reference-only; no secret values are resolved or echoed.
+Provisioning-plan requests accept only `domain` and `authProfileId`. The response is versioned and deterministic so the executor can resume safely without inventing new identifiers: it includes `planVersion`, `planKey`, sanitized `configHash`, lifecycle state, runtime public-client config, hosted UI details, expected post-activation outputs, normalized social IdP references, and per-operation `operationKey` plus `idempotencyKey` values. `planKey` and operation idempotency are bound to the sanitized desired config. `planned` and `provisioning` return resumable operations toward `active`; `active` returns an explicit noop plan; `suspended` and `failed` return explicit manual-review plans. Social IdPs stay reference-only; no secret values are resolved or echoed.
 
 `POST /auth/provisioning-executor`
 
@@ -90,7 +90,19 @@ Provisioning-plan requests accept only `domain` and `authProfileId`. The respons
 }
 ```
 
-`/auth/provisioning-executor` is server-only, must stay IAM-authorized, and is deployed on a separate Lambda boundary from the public proxy/runtime handler. Requests accept only `domain`, `authProfileId`, `mode`, optional `planKey`, and optional `idempotencyKey`. `dry-run` regenerates and validates the current plan, returns sanitized operation previews and a deterministic audit event, and does not perform AWS writes, call Cognito, or create/update/delete resources; it may read the server-only registry from the configured local or deployed sources. `apply` is explicit but fails closed with manual review required; it is not implemented and must not create Cognito resources until a future approved deploy/provisioning pass.
+`/auth/provisioning-executor` is server-only, must stay IAM-authorized, and is deployed on a separate Lambda boundary from the public proxy/runtime handler. Requests accept only `domain`, `authProfileId`, `mode`, optional `planKey`, and optional `idempotencyKey`. `dry-run` regenerates and validates the current plan, returns sanitized operation previews and a deterministic audit event, and does not perform AWS writes, call Cognito, or create/update/delete resources; it may read the server-only registry from the configured local or deployed sources.
+
+`apply` is implemented but disabled by default. A real apply request requires all of:
+
+- `AUTH_PROVISIONING_APPLY_ENABLED=true`
+- caller ARN exactly present in `AUTH_PROVISIONING_ALLOWED_ROLE_ARNS`
+- explicit current `planKey`
+- explicit current executor `idempotencyKey`
+- domain and tenant present in `AUTH_PROVISIONING_APPLY_ALLOWED_DOMAINS` / `AUTH_PROVISIONING_APPLY_ALLOWED_TENANTS` when those allowlists are configured
+- callback/logout hosts matching the requested domain or a server-proven alias
+- social IdP credential refs scoped to `/zoolanding/auth/{tenantId}/...`
+
+Apply preflights social IdP secrets before mutation, rejects placeholders, creates/updates Cognito resources non-destructively, writes per-operation state, and writes effective runtime activation state only after all operations succeed. Apply responses remain sanitized: no raw `secretRefs`, no secret values, no tokens, and no provider credential details.
 
 ## Server-Only Policy
 
@@ -235,8 +247,8 @@ The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for futur
 - A single draft/site can optionally configure one or more auth profiles.
 - Public auth runtime config exposes only safe public metadata and never exposes client secrets or social IdP secret refs.
 - Public auth runtime config rejects browser origins that do not belong to the requested domain or a proven managed alias for that domain.
-- Server-only provisioning plans are denied by default, remain plan-only until a future explicit deployment/provisioning decision, and expose stable operation/idempotency keys for a future executor.
-- Server-only provisioning executor dry-run returns sanitized previews and audit keys without secret refs; apply remains closed/no-op until explicitly approved and implemented.
+- Server-only provisioning plans are denied by default and expose stable operation/idempotency keys for the executor.
+- Server-only provisioning executor dry-run returns sanitized previews and audit keys without secret refs; apply remains closed unless explicitly enabled by deploy-time feature flag and allowlists.
 - The reusable JWT authorizer can protect future blogs, dashboards, uploads, and mutable actions using the same server-only registry policy.
 - The browser cannot choose arbitrary upstream URLs.
 - The browser cannot send undeclared input fields.
@@ -252,5 +264,5 @@ The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for futur
 - This repo creates only placeholder Secrets Manager entries; it does not store, generate, or rotate real upstream credential values.
 - This repo does not deploy itself automatically.
 - This repo does not expose `server/integrations.json` through runtime-read.
-- This repo does not create Cognito user pools, app clients, domains, Google/Facebook IdPs, API Gateway authorizers, or IAM roles unless a future deploy/provisioning step is explicitly run.
-- This repo does not execute Cognito provisioning through the scaffolded executor; the apply mode currently returns a safe not-implemented response.
+- This repo does not create Cognito user pools, app clients, domains, Google/Facebook IdPs, API Gateway authorizers, or IAM roles unless an approved deploy/provisioning step enables apply and provides the required allowlists and secrets.
+- Cognito apply is non-destructive in v1: it creates/updates required resources and records state, but it does not delete Cognito resources.

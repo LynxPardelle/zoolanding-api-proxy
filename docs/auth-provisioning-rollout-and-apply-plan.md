@@ -9,6 +9,12 @@ Current base evidence at authoring time:
 - Merge history includes PR #5: `768fbb7 Merge pull request #5 from LynxPardelle/codex/auth-cognito-executor-scaffold`
 - Scope here is documentation only. No deploy, AWS CLI, CloudFormation, Cognito, SSM, Secrets Manager, or real secret/token work is approved by this document.
 
+Update at 2026-06-09 21:04 CT:
+
+- Code now includes a guarded Cognito apply implementation behind `AUTH_PROVISIONING_APPLY_ENABLED=false` by default.
+- Apply requires exact caller ARN allowlist, explicit `planKey`, explicit `idempotencyKey`, optional domain/tenant allowlists, scoped social IdP secret refs, callback/logout URL ownership, per-operation DynamoDB state, and effective runtime activation state.
+- This is still NO-GO for real Zoosite Cognito creation until the real Zoosite auth secret refs exist in AWS, the apply allowlists are final, and a separate approved deploy enables `AUTH_PROVISIONING_APPLY_ENABLED=true`.
+
 ## Step 3: API Proxy Deploy Plan
 
 Status: planned only, not executed.
@@ -67,6 +73,7 @@ Stop immediately if any of these occur:
 - CloudFormation does not finish in `UPDATE_COMPLETE`.
 - Unsigned provisioning access succeeds.
 - Executor `apply` returns anything other than fail-closed `501` / `manual-review-required`.
+- Executor `apply` is enabled without exact ARN, domain, tenant, current plan key, and current idempotency key controls.
 - Runtime responses leak secrets, raw secret refs, tokens, or client secrets.
 - Zoosite runtime auth returns `enabled: true` before activation is explicitly approved.
 - CORS reflects an attacker or unapproved origin.
@@ -87,7 +94,7 @@ Minimum HTTP smoke coverage:
 - Unsigned provisioning request is denied.
 - Signed IAM provisioning-plan request returns `200` with plan-only output.
 - Signed IAM executor `dry-run` returns `200` with preview-only output.
-- Signed IAM executor `apply` returns `501` with `manual-review-required`.
+- Signed IAM executor `apply` returns `501` while `AUTH_PROVISIONING_APPLY_ENABLED=false`.
 - CORS allows only approved origins and does not reflect an attacker origin.
 - Zoosite planned runtime remains `enabled: false`.
 - Runtime and provisioning responses contain no `clientSecret`, no social IdP secret values, and no browser-exposed secret references.
@@ -108,11 +115,11 @@ Do not run these smoke tests in this task because no deploy/AWS approval was gra
 
 ## Step 5: Real Cognito Apply Design
 
-Status: design only. Do not implement, deploy, or create resources from this section without a separate approved task.
+Status: partially implemented behind a disabled feature flag. Do not deploy with `AUTH_PROVISIONING_APPLY_ENABLED=true` or create real Cognito resources without a separate approved task that provides final allowlists and real server-side secret refs.
 
 ### Execution Boundary
 
-Real apply should use a separate executor Lambda and IAM role. It should not run inside the public proxy Lambda that serves browser/runtime reads.
+Real apply uses a separate executor Lambda and IAM role. It must not run inside the public proxy Lambda that serves browser/runtime reads.
 
 The apply role should have only the permissions required to:
 
@@ -164,7 +171,8 @@ Initial real apply should require all of these gates:
 - `AUTH_PROVISIONING_APPLY_ENABLED=false` by default.
 - Explicit allowlists for IAM role ARNs, domains, and tenants.
 - Required `planKey`.
-- Required prior dry-run audit event for the same sanitized config hash.
+- Required executor `idempotencyKey`.
+- Required prior dry-run audit event for the same sanitized config hash before enabling apply in production.
 - Social IdP apply flag remains false until mappings and secret handling are verified.
 - Callback and logout URL allowlists validated before mutation.
 - Concurrency lock per domain/profile.

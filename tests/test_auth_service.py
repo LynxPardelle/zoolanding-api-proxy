@@ -47,6 +47,17 @@ def payload(response):
     return json.loads(response["body"])
 
 
+def template_resource_block(template, resource_name):
+    match = re.search(
+        rf"^  {re.escape(resource_name)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9]+:\n|\Z)",
+        template,
+        re.M | re.S,
+    )
+    if not match:
+        raise AssertionError(f"Template resource not found: {resource_name}")
+    return match.group("body")
+
+
 def build_profile(auth_profile_id, status, **overrides):
     profile = {
         "authProfileId": auth_profile_id,
@@ -191,6 +202,47 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
         self.assertNotIn("status", body["auth"])
         self.assertNotIn("socialIdpSecretRefs", json.dumps(body))
         self.assertNotIn("clientSecret", json.dumps(body))
+
+    def test_runtime_config_uses_effective_active_state_for_completed_apply(self):
+        reset_auth_clients()
+        registry = active_registry()
+        plan = auth._cognito_plan("example.test", registry["profiles"][1])
+        dynamodb = FakeDynamoClient()
+        key = auth._auth_state_key(plan)
+        dynamodb.items[(key["pk"], key["sk"])] = {
+            "pk": {"S": key["pk"]},
+            "sk": {"S": key["sk"]},
+            "status": {"S": "active"},
+            "configHash": {"S": plan["configHash"]},
+            "runtimeAuthJson": {"S": json.dumps({
+                "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_CREATED",
+                "hostedUiDomain": "https://planned-auth.auth.us-east-1.amazoncognito.com",
+                "clientId": "public-client-created",
+                "userPoolId": "us-east-1_CREATED",
+            })},
+        }
+        fake_boto3 = FakeBoto3(
+            cognito=FakeCognitoClient(),
+            dynamodb=dynamodb,
+            ssm=FakeSsmClient(fake_social_secret_values()),
+            secrets=FakeSecretsClient(),
+        )
+        event = api_event("/auth/runtime-config", {
+            "domain": "Example.Test",
+            "authProfileId": "planned",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_STATE_TABLE_NAME": "test-auth-state"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertTrue(body["auth"]["enabled"])
+        self.assertEqual(body["auth"]["clientId"], "public-client-created")
+        self.assertEqual(body["auth"]["issuer"], "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_CREATED")
+        self.assertEqual(body["auth"]["hostedUiDomain"], "https://planned-auth.auth.us-east-1.amazoncognito.com")
 
     def test_runtime_config_rejects_browser_supplied_secret_or_policy_fields(self):
         event = api_event("/auth/runtime-config", {
@@ -357,21 +409,64 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
             ),
         )
 
-    def test_provisioning_executor_uses_separate_lambda_and_state_table_without_cognito_writes(self):
+    def test_provisioning_executor_uses_separate_lambda_and_state_table_without_api_proxy_cognito_writes(self):
         with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
             template = template_file.read()
 
+        api_proxy = template_resource_block(template, "ApiProxyFunction")
+        executor = template_resource_block(template, "AuthProvisioningExecutorFunction")
+
         self.assertIn("AuthProvisioningStateTable:", template)
         self.assertRegex(
-            template,
+            executor,
             re.compile(
-                r"AuthProvisioningExecutorFunction:.*?Handler:\s*auth_service\.auth_lambda_handler"
+                r"Handler:\s*auth_service\.auth_lambda_handler"
                 r".*?AUTH_PROVISIONING_STATE_TABLE_NAME:"
                 r".*?AuthProvisioningExecutorPost:.*?Authorizer:\s*AWS_IAM",
                 re.S,
             ),
         )
-        self.assertNotIn("cognito-idp:", template)
+        self.assertNotIn("cognito-idp:", api_proxy)
+
+    def test_provisioning_executor_template_grants_minimal_apply_permissions_only_to_executor(self):
+        with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
+            template = template_file.read()
+
+        api_proxy = template_resource_block(template, "ApiProxyFunction")
+        executor = template_resource_block(template, "AuthProvisioningExecutorFunction")
+        required_executor_actions = {
+            "cognito-idp:CreateUserPool",
+            "cognito-idp:CreateUserPoolClient",
+            "cognito-idp:CreateUserPoolDomain",
+            "cognito-idp:DescribeIdentityProvider",
+            "cognito-idp:DescribeUserPool",
+            "cognito-idp:DescribeUserPoolClient",
+            "cognito-idp:DescribeUserPoolDomain",
+            "cognito-idp:ListGroups",
+            "cognito-idp:UpdateIdentityProvider",
+            "cognito-idp:UpdateUserPoolClient",
+            "ssm:GetParameter",
+            "secretsmanager:GetSecretValue",
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+        }
+        forbidden_cognito_actions = {
+            "cognito-idp:*",
+            "cognito-idp:AdminCreateUser",
+            "cognito-idp:AdminSetUserPassword",
+            "cognito-idp:AdminDeleteUser",
+            "cognito-idp:DeleteUserPool",
+            "cognito-idp:DeleteUserPoolClient",
+            "cognito-idp:DeleteIdentityProvider",
+        }
+
+        for action in required_executor_actions:
+            self.assertIn(action, executor)
+        for action in forbidden_cognito_actions:
+            self.assertNotIn(action, executor)
+        self.assertIn("AuthProvisioningStateTable", executor)
+        self.assertIn("AuthProvisioningSecretParameterPrefix", executor)
+        self.assertNotIn("cognito-idp:", api_proxy)
 
 
 class TestAuthServiceProvisioningPlan(unittest.TestCase):
@@ -600,8 +695,166 @@ class TestAuthServiceProvisioningPlan(unittest.TestCase):
             self.assertEqual(response["statusCode"], 200)
             self.assertEqual(body["plan"]["status"], auth_profile_id)
             self.assertFalse(body["plan"]["runtimeAuth"]["currentEnabled"])
-            self.assertEqual(body["plan"]["lifecycle"]["executorAction"], "manual-review")
-            self.assertEqual(body["plan"]["operations"], [])
+        self.assertEqual(body["plan"]["lifecycle"]["executorAction"], "manual-review")
+        self.assertEqual(body["plan"]["operations"], [])
+
+
+class FakeCognitoClient:
+    def __init__(self):
+        self.calls = []
+        self.groups = set()
+
+    def _record(self, name, **kwargs):
+        self.calls.append((name, kwargs))
+
+    def create_user_pool(self, **kwargs):
+        self._record("create_user_pool", **kwargs)
+        return {"UserPool": {"Id": "us-east-1_TESTPOOL"}}
+
+    def describe_user_pool(self, **kwargs):
+        self._record("describe_user_pool", **kwargs)
+        return {"UserPool": {"Id": kwargs["UserPoolId"]}}
+
+    def describe_user_pool_domain(self, **kwargs):
+        self._record("describe_user_pool_domain", **kwargs)
+        return {}
+
+    def create_user_pool_domain(self, **kwargs):
+        self._record("create_user_pool_domain", **kwargs)
+        return {}
+
+    def create_user_pool_client(self, **kwargs):
+        self._record("create_user_pool_client", **kwargs)
+        return {"UserPoolClient": {"ClientId": "public-client-created"}}
+
+    def describe_user_pool_client(self, **kwargs):
+        self._record("describe_user_pool_client", **kwargs)
+        return {"UserPoolClient": {"ClientId": kwargs["ClientId"]}}
+
+    def update_user_pool_client(self, **kwargs):
+        self._record("update_user_pool_client", **kwargs)
+        return {"UserPoolClient": {"ClientId": kwargs["ClientId"]}}
+
+    def list_groups(self, **kwargs):
+        self._record("list_groups", **kwargs)
+        return {"Groups": [{"GroupName": group} for group in sorted(self.groups)]}
+
+    def create_group(self, **kwargs):
+        self._record("create_group", **kwargs)
+        self.groups.add(kwargs["GroupName"])
+        return {"Group": {"GroupName": kwargs["GroupName"]}}
+
+    def describe_identity_provider(self, **kwargs):
+        self._record("describe_identity_provider", **kwargs)
+        return {}
+
+    def create_identity_provider(self, **kwargs):
+        self._record("create_identity_provider", **kwargs)
+        return {"IdentityProvider": {"ProviderName": kwargs["ProviderName"]}}
+
+    def update_identity_provider(self, **kwargs):
+        self._record("update_identity_provider", **kwargs)
+        return {"IdentityProvider": {"ProviderName": kwargs["ProviderName"]}}
+
+
+class FakeDynamoClient:
+    def __init__(self):
+        self.items = {}
+        self.calls = []
+
+    def get_item(self, **kwargs):
+        self.calls.append(("get_item", kwargs))
+        key = self._key(kwargs["Key"])
+        item = self.items.get(key)
+        return {"Item": item} if item else {}
+
+    def put_item(self, **kwargs):
+        self.calls.append(("put_item", kwargs))
+        key = self._key(kwargs["Item"])
+        self.items[key] = kwargs["Item"]
+        return {}
+
+    def seed_operation(self, plan, operation_id, outputs):
+        operation = next(op for op in plan["operations"] if op["operationId"] == operation_id)
+        key = auth._operation_state_key(plan, operation)
+        self.items[(key["pk"], key["sk"])] = {
+            "pk": {"S": key["pk"]},
+            "sk": {"S": key["sk"]},
+            "operationId": {"S": operation_id},
+            "idempotencyKey": {"S": operation["idempotencyKey"]},
+            "status": {"S": "succeeded"},
+            "outputsJson": {"S": json.dumps(outputs, sort_keys=True, separators=(",", ":"))},
+        }
+
+    def _key(self, value):
+        return (value["pk"]["S"], value["sk"]["S"])
+
+
+class FakeSsmClient:
+    class exceptions:
+        class ParameterNotFound(Exception):
+            pass
+
+    def __init__(self, values):
+        self.values = values
+        self.calls = []
+
+    def get_parameter(self, **kwargs):
+        self.calls.append(kwargs)
+        name = kwargs["Name"]
+        if name not in self.values:
+            raise FakeSsmClient.exceptions.ParameterNotFound()
+        return {"Parameter": {"Value": self.values[name]}}
+
+
+class FakeSecretsClient:
+    def __init__(self, values=None):
+        self.values = values or {}
+        self.calls = []
+
+    def get_secret_value(self, **kwargs):
+        self.calls.append(kwargs)
+        secret_id = kwargs["SecretId"]
+        if secret_id not in self.values:
+            raise KeyError(secret_id)
+        return {"SecretString": self.values[secret_id]}
+
+
+class FakeBoto3:
+    def __init__(self, *, cognito, dynamodb, ssm, secrets):
+        self.cognito = cognito
+        self.dynamodb = dynamodb
+        self.ssm = ssm
+        self.secrets = secrets
+
+    def client(self, service_name):
+        if service_name == "cognito-idp":
+            return self.cognito
+        if service_name == "dynamodb":
+            return self.dynamodb
+        if service_name == "ssm":
+            return self.ssm
+        if service_name == "secretsmanager":
+            return self.secrets
+        raise AssertionError(f"Unexpected client: {service_name}")
+
+
+def fake_social_secret_values():
+    return {
+        "/zoolanding/auth/tenant-a/planned/facebook/client-id": "facebook-client-id-test",
+        "/zoolanding/auth/tenant-a/planned/facebook/client-secret": "facebook-client-secret-test",
+        "/zoolanding/auth/tenant-a/planned/google/client-id": "google-client-id-test",
+        "/zoolanding/auth/tenant-a/planned/google/client-secret": "google-client-secret-test",
+        "/zoolanding/auth/tenant-a/planned/oidc/client-id": "oidc-client-id-test",
+        "/zoolanding/auth/tenant-a/planned/oidc/client-secret": "oidc-client-secret-test",
+    }
+
+
+def reset_auth_clients():
+    auth._COGNITO_IDP_CLIENT = None
+    auth._DYNAMODB_CLIENT = None
+    auth._SSM_CLIENT = None
+    auth._SECRETS_CLIENT = None
 
 
 class TestAuthServiceProvisioningExecutor(unittest.TestCase):
@@ -616,6 +869,43 @@ class TestAuthServiceProvisioningExecutor(unittest.TestCase):
             "/auth/provisioning-executor",
             body,
             request_context=self.trusted_context,
+        )
+
+    def apply_event(self, *, registry=None, extra_body=None):
+        registry = registry or active_registry()
+        plan = auth._cognito_plan("example.test", registry["profiles"][1])
+        body = {
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "apply",
+            "planKey": plan["planKey"],
+            "idempotencyKey": auth._executor_idempotency_key(plan, "apply", None),
+        }
+        if extra_body:
+            body.update(extra_body)
+        return self.trusted_event(body), plan
+
+    def apply_env(self):
+        return {
+            "AUTH_PROVISIONING_ALLOWED_ROLE_ARNS": self.trusted_context["identity"]["userArn"],
+            "AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "",
+            "AUTH_PROVISIONING_APPLY_ENABLED": "true",
+            "AUTH_PROVISIONING_STATE_TABLE_NAME": "test-auth-state",
+            "AUTH_PROVISIONING_APPLY_ALLOWED_DOMAINS": "example.test",
+            "AUTH_PROVISIONING_APPLY_ALLOWED_TENANTS": "tenant-a",
+            "AWS_REGION": "us-east-1",
+        }
+
+    def fake_aws(self, *, secrets=None):
+        cognito = FakeCognitoClient()
+        dynamodb = FakeDynamoClient()
+        ssm = FakeSsmClient(secrets or fake_social_secret_values())
+        secrets_client = FakeSecretsClient()
+        return cognito, dynamodb, ssm, FakeBoto3(
+            cognito=cognito,
+            dynamodb=dynamodb,
+            ssm=ssm,
+            secrets=secrets_client,
         )
 
     def test_executor_dry_run_returns_sanitized_preview_without_aws_calls(self):
@@ -663,9 +953,195 @@ class TestAuthServiceProvisioningExecutor(unittest.TestCase):
         self.assertFalse(body["ok"])
         self.assertEqual(body["executor"]["mode"], "apply")
         self.assertEqual(body["executor"]["executionStatus"], "manual-review-required")
-        self.assertEqual(body["error"], "Cognito executor apply is not implemented")
+        self.assertEqual(body["error"], "Cognito executor apply is disabled")
+        self.assertEqual(body["executor"]["blockedReason"], "apply-disabled")
         self.assertEqual(body["executor"]["operations"], [])
         load_item.assert_not_called()
+
+    def test_executor_apply_requires_explicit_plan_and_idempotency_keys(self):
+        cases = [
+            {"idempotencyKey": "0" * 64},
+            {"planKey": "0" * 64},
+        ]
+        for body in cases:
+            event = self.trusted_event({
+                "domain": "example.test",
+                "authProfileId": "planned",
+                "mode": "apply",
+                **body,
+            })
+            with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                    patch.dict(os.environ, self.apply_env()):
+                response = auth.auth_lambda_handler(event, Ctx())
+
+            self.assertEqual(response["statusCode"], 400)
+            self.assertIn("requires", payload(response)["error"])
+
+    def test_executor_apply_requires_exact_allowed_arn_not_role_name(self):
+        event, _plan = self.apply_event()
+        env = self.apply_env()
+        env["AUTH_PROVISIONING_ALLOWED_ROLE_ARNS"] = ""
+        env["AUTH_PROVISIONING_ALLOWED_ROLE_NAMES"] = "zoolanding-auth-planner"
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, env):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 403)
+        self.assertEqual(payload(response)["error"], "Provisioning apply access denied")
+
+    def test_executor_apply_flag_true_runs_cognito_apply_with_fake_clients_and_sanitized_success_summary(self):
+        reset_auth_clients()
+        event, _plan = self.apply_event()
+        cognito, dynamodb, ssm, fake_boto3 = self.fake_aws()
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        serialized = json.dumps(body, sort_keys=True)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["executor"]["mode"], "apply")
+        self.assertEqual(body["executor"]["executionStatus"], "applied")
+        self.assertTrue(body["executor"]["auditEvent"]["mutationAttempted"])
+        self.assertEqual(len(body["executor"]["operations"]), 6)
+        self.assertEqual(
+            [call[0] for call in cognito.calls],
+            [
+                "create_user_pool",
+                "describe_user_pool_domain",
+                "create_user_pool_domain",
+                "create_user_pool_client",
+                "list_groups",
+                "create_group",
+                "describe_identity_provider",
+                "create_identity_provider",
+                "describe_identity_provider",
+                "create_identity_provider",
+                "describe_identity_provider",
+                "create_identity_provider",
+                "update_user_pool_client",
+            ],
+        )
+        self.assertIn("/zoolanding/auth/tenant-a/planned/google/client-id", [call["Name"] for call in ssm.calls])
+        self.assertGreaterEqual(len([call for call in dynamodb.calls if call[0] == "put_item"]), 7)
+        facebook_call = next(kwargs for name, kwargs in cognito.calls if name == "create_identity_provider" and kwargs["ProviderName"] == "Facebook")
+        google_call = next(kwargs for name, kwargs in cognito.calls if name == "create_identity_provider" and kwargs["ProviderName"] == "Google")
+        self.assertEqual(facebook_call["ProviderDetails"]["authorize_scopes"], "public_profile,email")
+        self.assertEqual(facebook_call["ProviderDetails"]["api_version"], "v17.0")
+        self.assertEqual(google_call["ProviderDetails"]["authorize_scopes"], "openid email profile")
+        self.assertEqual(body["executor"]["outputs"]["clientId"], "public-client-created")
+        self.assertEqual(body["executor"]["outputs"]["hostedUiDomain"], "https://planned-auth.auth.us-east-1.amazoncognito.com")
+        self.assertNotIn("secretRefs", serialized)
+        self.assertNotIn("/zoolanding/auth", serialized)
+        self.assertNotIn("google-client-secret-test", serialized)
+        self.assertNotIn("facebook-client-secret-test", serialized)
+
+    def test_executor_apply_fails_closed_before_social_idp_mutation_when_required_secret_refs_are_missing(self):
+        reset_auth_clients()
+        registry = active_registry()
+        del registry["profiles"][1]["socialIdentityProviders"][1]["clientSecretRef"]
+        event, _plan = self.apply_event(registry=registry)
+        cognito, _dynamodb, _ssm, fake_boto3 = self.fake_aws()
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(payload(response)["error"], "Social identity provider credential secret is not configured")
+        self.assertEqual(cognito.calls, [])
+
+    def test_executor_apply_fails_closed_before_social_idp_mutation_when_required_secret_values_are_missing(self):
+        reset_auth_clients()
+        event, _plan = self.apply_event()
+        secret_values = fake_social_secret_values()
+        del secret_values["/zoolanding/auth/tenant-a/planned/facebook/client-secret"]
+        cognito, _dynamodb, _ssm, fake_boto3 = self.fake_aws(secrets=secret_values)
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(payload(response)["error"], "Social identity provider credential secret is invalid")
+        self.assertEqual(cognito.calls, [])
+
+    def test_executor_apply_rejects_cross_tenant_secret_refs_before_mutation(self):
+        reset_auth_clients()
+        registry = active_registry()
+        registry["profiles"][1]["socialIdentityProviders"][0]["clientIdRef"] = "/zoolanding/auth/other-tenant/planned/facebook/client-id"
+        event, _plan = self.apply_event(registry=registry)
+        cognito, _dynamodb, _ssm, fake_boto3 = self.fake_aws()
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(payload(response)["error"], "Social identity provider credential reference is outside tenant scope")
+        self.assertEqual(cognito.calls, [])
+
+    def test_executor_apply_routes_secrets_manager_arn_refs_without_ssm_lookup(self):
+        reset_auth_clients()
+        registry = active_registry()
+        google = registry["profiles"][1]["socialIdentityProviders"][1]
+        google["clientIdRef"] = "arn:aws:secretsmanager:us-east-1:123456789012:secret:/zoolanding/auth/tenant-a/planned/google/client-id"
+        google["clientSecretRef"] = "arn:aws:secretsmanager:us-east-1:123456789012:secret:/zoolanding/auth/tenant-a/planned/google/client-secret"
+        event, _plan = self.apply_event(registry=registry)
+        cognito = FakeCognitoClient()
+        dynamodb = FakeDynamoClient()
+        ssm = FakeSsmClient(fake_social_secret_values())
+        secrets = FakeSecretsClient({
+            google["clientIdRef"]: "google-client-id-from-secrets-manager",
+            google["clientSecretRef"]: "google-client-secret-from-secrets-manager",
+        })
+        fake_boto3 = FakeBoto3(cognito=cognito, dynamodb=dynamodb, ssm=ssm, secrets=secrets)
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertIn("create_identity_provider", [call[0] for call in cognito.calls])
+        self.assertEqual([call["SecretId"] for call in secrets.calls], [
+            google["clientIdRef"],
+            google["clientSecretRef"],
+        ])
+        self.assertNotIn(google["clientIdRef"], [call["Name"] for call in ssm.calls])
+        self.assertNotIn("google-client-secret-from-secrets-manager", response["body"])
+
+    def test_executor_apply_resumes_without_repeating_already_succeeded_state_operations(self):
+        reset_auth_clients()
+        event, plan = self.apply_event()
+        cognito, dynamodb, _ssm, fake_boto3 = self.fake_aws()
+        dynamodb.seed_operation(plan, "ensure-user-pool", {
+            "userPoolId": "us-east-1_EXISTING",
+            "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EXISTING",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        actions = [call[0] for call in cognito.calls]
+        operation_statuses = {item["operationId"]: item["status"] for item in body["executor"]["operations"]}
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["executor"]["executionStatus"], "applied")
+        self.assertEqual(operation_statuses["ensure-user-pool"], "skipped")
+        self.assertNotIn("create_user_pool", actions)
+        self.assertIn("create_user_pool_domain", actions)
+        self.assertIn("update_user_pool_client", actions)
+        self.assertGreaterEqual(len([call for call in dynamodb.calls if call[0] == "put_item"]), 6)
 
     def test_executor_rejects_extra_fields_and_browser_secret_material(self):
         for field_name in ("clientSecret", "adminOverride"):
