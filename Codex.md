@@ -61,3 +61,9 @@
 - `mode: dry-run` regenerates the current Cognito plan, validates optional `planKey`, and returns sanitized operation previews plus deterministic audit/idempotency keys without secret refs or raw credential material.
 - `mode: apply` intentionally fails closed with `501`, `manual-review-required`, and no operations. Real Cognito creation/update/delete remains pending explicit approval, implementation, validation, and future deploy.
 - This pass stayed local-only: no deploy, no AWS/Cognito/API Gateway/IAM/DynamoDB/S3/SSM/Secrets Manager calls, no secrets/tokens added, and no push/PR.
+
+## 2026-06-09 18:49 CT - Auth Provisioning Rollout And Apply Plan Docs
+
+- `origin/main` was verified at `768fbb7afe2721f51a274935edd5ec4dbe4ec31e`, with PR #4 and PR #5 present in merge history.
+- Steps 3, 4, and 5 are now documented in `docs/auth-provisioning-rollout-and-apply-plan.md`: API proxy deploy plan, post-deploy smoke plan, and future real Cognito apply design.
+- This documentation pass did not deploy, call AWS, call Cognito, create real resources, read or write secrets, or add tokens.
