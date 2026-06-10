@@ -116,3 +116,16 @@
 - Same-name user pools without matching `managedBy`, `domain`, `tenantId`, and `authProfileId` tags fail closed instead of being adopted.
 - Operation state writes now allow retry from `failed` for the same idempotency path, while `succeeded` remains terminal. Local tests cover user pool and public app client retries after DynamoDB `succeeded` write failures.
 - No deploy, no AWS calls, no real Cognito resources, no social IdP secrets, and no tokens were created in this reconciliation step.
+
+## 2026-06-09 23:15 CT - Guarded Apply Production Readiness Deploy
+
+- PR #10 was merged to `main` as `2be60d0`, then deployed to stack `zoolanding-api-proxy` in `us-east-1`.
+- First deploy preserved `AuthProvisioningApplyEnabled=false` and the exact allowed caller ARN. A second deploy set live apply allowlists to `AuthProvisioningApplyAllowedDomains=zoositioweb.com.mx` and `AuthProvisioningApplyAllowedTenants=tenant-a`, still with apply disabled.
+- CloudFormation completed `UPDATE_COMPLETE`. Stack outputs still include `ApiUrl=https://yxp97qlog2.execute-api.us-east-1.amazonaws.com/Prod`, `AuthProvisioningExecutorFunctionName=zoolanding-api-proxy-AuthProvisioningExecutorFunct-D4RqgVhOtoJt`, and `AuthProvisioningStateTableName=zoolanding-auth-provisioning-state`.
+- Live runtime smoke returned `200`, `ok:true`, `auth.authProfileId:"staff"`, and `auth.enabled:false` through both execute-api and `https://api.zoolandingpage.com.mx`; bad origin `https://evil.example` returned `400`, `Origin is not allowed for requested domain`.
+- Unsigned provisioning-plan and provisioning-executor POSTs returned `403`, `Missing Authentication Token`; OPTIONS for both endpoints returned `200`.
+- Signed provisioning-plan returned `200`, `mode:"plan-only"`, `status:"planned"`, six operations, and config hash `a047d17beea7650d5a003919aceaa09e0ebc9dbd0ab2b502ce03e892e05a64cd`. Signed executor dry-run returned `200`, `executionStatus:"preview-only"`, six operations, `mutationAttempted:false`, no `secretRefs`, no `clientSecret`, and no auth ref prefix in the response.
+- Signed executor apply with apply disabled returned `501`, `error:"Cognito executor apply is disabled"`, `blockedReason:"apply-disabled"`, zero operations, `mutationAttempted:false`, and no secret refs or client secret.
+- Read-only Cognito verification returned `[]` for user pools containing `zoosite` or `zoolanding`; no real Cognito resources were created.
+- Current blocker for real apply: the live plan has Google and Facebook provider refs, but both provider credential refs are missing in AWS. Real apply must stay disabled until those real IdP credentials exist and pass non-placeholder preflight.
+- Operational note: avoid `aws configure export-credentials --format env` in visible tool output; capture `--format process` output in memory instead. The earlier visible export output should be treated as a credential exposure and the local IAM access key should be rotated.
