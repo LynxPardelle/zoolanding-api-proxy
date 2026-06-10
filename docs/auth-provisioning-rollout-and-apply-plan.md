@@ -1,0 +1,208 @@
+# Auth Provisioning Rollout And Apply Plan
+
+This document materializes steps 3, 4, and 5 for the auth provisioning work after PR #4 and PR #5 merged to `main`.
+
+Current base evidence at authoring time:
+
+- `origin/main`: `768fbb7afe2721f51a274935edd5ec4dbe4ec31e`
+- Merge history includes PR #4: `841d83e Merge pull request #4 from LynxPardelle/codex/auth-cognito-provisioning-dry-run`
+- Merge history includes PR #5: `768fbb7 Merge pull request #5 from LynxPardelle/codex/auth-cognito-executor-scaffold`
+- Scope here is documentation only. No deploy, AWS CLI, CloudFormation, Cognito, SSM, Secrets Manager, or real secret/token work is approved by this document.
+
+## Step 3: API Proxy Deploy Plan
+
+Status: planned only, not executed.
+
+The SAM stack is `zoolanding-api-proxy` in `us-east-1`. The checked-in `samconfig.toml` already targets that stack and region. The template exports these auth-relevant outputs:
+
+- `ApiUrl`
+- `AuthRuntimeConfigEndpoint`
+- `AuthProvisioningPlanEndpoint`
+- `AuthProvisioningExecutorEndpoint`
+- `FunctionName`
+- `AuthJwtAuthorizerFunctionName`
+
+Recommended preflight before any future approved deploy:
+
+```powershell
+git status --short
+git fetch origin
+git log -1 --oneline origin/main
+gh pr checks 4
+gh pr checks 5
+python -m unittest discover -s tests -p "test_*.py"
+sam validate --lint
+sam build --no-cached
+```
+
+Deploy command shape, for planning only:
+
+```powershell
+# NO EJECUTAR SIN APROBACION EXPLICITA.
+sam deploy `
+  --stack-name zoolanding-api-proxy `
+  --region us-east-1 `
+  --capabilities CAPABILITY_IAM `
+  --parameter-overrides `
+    ConfigTableName=<config-table-name> `
+    ConfigPayloadsBucketName=<config-payloads-bucket-name> `
+    AllowedCorsOrigins=<comma-separated-approved-origins> `
+    SecretNamePrefix=<ssm-parameter-prefix> `
+    AuthRegistryFileName=<auth-registry-file-name> `
+    AuthProvisioningAllowedRoleNames=<comma-separated-approved-role-names> `
+    AuthProvisioningAllowedRoleArns=<comma-separated-approved-role-arns> `
+    LogLevel=<INFO-or-approved-level>
+```
+
+Required approvals and missing values before execution:
+
+- Explicit deploy/AWS approval for this stack and region.
+- Current post-merge `ApiUrl` or CloudFormation outputs from an approved deploy.
+- Exact allowed IAM role names or ARNs for provisioning-plan and provisioning-executor access.
+- Final approved values for all deploy parameters, especially CORS origins and auth registry file name.
+
+Stop immediately if any of these occur:
+
+- Validation or build fails.
+- CloudFormation does not finish in `UPDATE_COMPLETE`.
+- Unsigned provisioning access succeeds.
+- Executor `apply` returns anything other than fail-closed `501` / `manual-review-required`.
+- Runtime responses leak secrets, raw secret refs, tokens, or client secrets.
+- Zoosite runtime auth returns `enabled: true` before activation is explicitly approved.
+- CORS reflects an attacker or unapproved origin.
+
+## Step 4: Post-Deploy Smoke Plan
+
+Status: planned only, not executed. These checks require an approved deploy and a current API URL.
+
+Minimum HTTP smoke coverage:
+
+- `GET /auth/runtime-config`
+- `POST /auth/runtime-config`
+- `OPTIONS /auth/runtime-config`
+- `POST /auth/provisioning-plan`
+- `OPTIONS /auth/provisioning-plan`
+- `POST /auth/provisioning-executor`
+- `OPTIONS /auth/provisioning-executor`
+- Unsigned provisioning request is denied.
+- Signed IAM provisioning-plan request returns `200` with plan-only output.
+- Signed IAM executor `dry-run` returns `200` with preview-only output.
+- Signed IAM executor `apply` returns `501` with `manual-review-required`.
+- CORS allows only approved origins and does not reflect an attacker origin.
+- Zoosite planned runtime remains `enabled: false`.
+- Runtime and provisioning responses contain no `clientSecret`, no social IdP secret values, and no browser-exposed secret references.
+
+Evidence to capture, with Central Time timestamps:
+
+- Git SHA under test.
+- Unit test and SAM validation/build output.
+- SAM deploy and CloudFormation output only if deploy was explicitly approved.
+- CloudFormation stack outputs including `ApiUrl` and auth endpoints.
+- HTTP status codes, selected headers, and sanitized response bodies.
+- Negative unsigned IAM provisioning evidence.
+- Executor apply fail-closed evidence.
+- Zoosite `enabled:false` evidence.
+- CORS origin-isolation evidence.
+
+Do not run these smoke tests in this task because no deploy/AWS approval was granted.
+
+## Step 5: Real Cognito Apply Design
+
+Status: design only. Do not implement, deploy, or create resources from this section without a separate approved task.
+
+### Execution Boundary
+
+Real apply should use a separate executor Lambda and IAM role. It should not run inside the public proxy Lambda that serves browser/runtime reads.
+
+The apply role should have only the permissions required to:
+
+- Read private config from S3 and DynamoDB.
+- Write provisioning state and audit events to DynamoDB.
+- Optionally write sanitized JSONL audit records to S3.
+- Resolve scoped SSM/Secrets Manager/KMS secrets only during apply.
+- Create, describe, list, update, and tag the required Cognito resources.
+
+The apply role must not grant `Delete*`, `AdminCreateUser`, IAM, CloudFormation, Route53, or ACM permissions.
+
+### Cognito Resource Model
+
+Create a User Pool per draft/client/auth profile when strong isolation is required. The app client should be public with `GenerateSecret=false`, Authorization Code flow, and PKCE. Start with a Cognito prefix domain; custom domain work belongs in a later design because it introduces DNS and certificate ownership.
+
+Provision these resource families idempotently:
+
+- User Pool
+- Public App Client
+- User Pool Domain
+- Groups
+- Google, Facebook, and OIDC identity providers
+- App Client supported provider updates after IdPs exist
+
+### State, Idempotency, And Runtime Status
+
+Keep desired config in the registry and effective state in a new `AuthProvisioningState` DynamoDB model. Supported lifecycle statuses remain:
+
+- `planned`
+- `provisioning`
+- `active`
+- `suspended`
+- `failed`
+
+Runtime config must remain disabled except when effective state is `active`.
+
+Use an operation ledger keyed by `operationKey` and idempotency key. The executor key should include a hash of `planVersion`, `planKey`, `mode`, and the sanitized config hash. Apply must read, compare, create, update, and resume partial operations without duplicating resources.
+
+### Secrets
+
+Resolve social IdP secret refs only in apply mode. Preflight all secret references before the first mutation. Reject placeholders. Never expose secret values, raw tokens, raw secret refs, or provider credentials in plan, dry-run, audit, logs, browser responses, or PR text.
+
+`SecretNamePrefix` currently points at `zoolanding/api/`; real apply must reconcile that with `/zoolanding/auth/...` style auth refs before execution.
+
+### Guardrails
+
+Initial real apply should require all of these gates:
+
+- `AUTH_PROVISIONING_APPLY_ENABLED=false` by default.
+- Explicit allowlists for IAM role ARNs, domains, and tenants.
+- Required `planKey`.
+- Required prior dry-run audit event for the same sanitized config hash.
+- Social IdP apply flag remains false until mappings and secret handling are verified.
+- Callback and logout URL allowlists validated before mutation.
+- Concurrency lock per domain/profile.
+
+### Rollback
+
+Version 1 should not delete Cognito resources. Rollback is logical:
+
+- Mark status `suspended` or `failed`.
+- Keep runtime disabled.
+- Persist partial resource IDs.
+- Resume or repair idempotently in a later approved operation.
+
+### Tests Required Before Apply
+
+Before enabling apply, add tests for:
+
+- Botocore Stubber coverage for Cognito, SSM/Secrets Manager, KMS, DynamoDB, and S3 interactions.
+- Duplicate retry produces no duplicate resources.
+- State/config mismatches block mutation.
+- Partial operation resume.
+- Secret preflight failure performs no mutation.
+- No secret leaks in plan, dry-run, audit, logs, or runtime config.
+- IAM templates have no wildcard write/admin/delete permissions.
+- Callback and logout allowlists.
+- Social provider details and attribute mappings.
+- Concurrency locks.
+- Non-destructive removal semantics.
+
+### Known Gaps To Resolve First
+
+- Planned profiles currently require `clientId` or `audience`, but a real Cognito app client ID is generated during apply.
+- `planKey` should hash sanitized config, not only version/domain/profile/status.
+- Operation idempotency needs the sanitized config hash.
+- A state/audit table is missing.
+- A separate apply role and executor Lambda are missing.
+- `SecretNamePrefix` does not yet clearly match auth refs.
+- Hosted UI domain schema needs prefix/custom distinction.
+- ProviderDetails and AttributeMapping schema needs durable validation.
+- Callback/logout validation needs to be finalized before apply.
+- Removals must be explicitly non-destructive in v1.

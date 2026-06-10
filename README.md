@@ -60,6 +60,8 @@ Then point the Angular dev server proxy at `http://127.0.0.1:5055`. The local au
 
 Do not deploy or create secrets until the frontend and policy contract are reviewed.
 
+The auth provisioning rollout, post-deploy smoke plan, and future real Cognito apply design are documented in [docs/auth-provisioning-rollout-and-apply-plan.md](docs/auth-provisioning-rollout-and-apply-plan.md). That document is planning-only unless a future task explicitly approves deploy/AWS/Cognito execution.
+
 ```bash
 sam build --no-cached
 sam deploy
