@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import re
 import hashlib
+import time
 import urllib.parse
 from typing import Any, Dict, Optional
 
@@ -29,13 +30,26 @@ except Exception:  # pragma: no cover - dependency is validated in tests/audit
     jwt = None
     PyJWKClient = None
 
+try:
+    import boto3  # type: ignore
+except Exception:  # pragma: no cover - local fallback when boto3 is unavailable
+    boto3 = None
+
 
 CONFIG_TABLE_NAME = os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry")
 CONFIG_PAYLOADS_BUCKET_NAME = os.getenv("CONFIG_PAYLOADS_BUCKET_NAME", "zoolanding-config-payloads")
 AUTH_REGISTRY_FILE_NAME = os.getenv("AUTH_REGISTRY_FILE_NAME", "auth-profile-registry.json")
 AUTH_PROVISIONING_ALLOWED_ROLE_NAMES = os.getenv("AUTH_PROVISIONING_ALLOWED_ROLE_NAMES", "")
 AUTH_PROVISIONING_ALLOWED_ROLE_ARNS = os.getenv("AUTH_PROVISIONING_ALLOWED_ROLE_ARNS", "")
+AUTH_PROVISIONING_STATE_TABLE_NAME = os.getenv("AUTH_PROVISIONING_STATE_TABLE_NAME", "")
+AUTH_PROVISIONING_APPLY_ENABLED = os.getenv("AUTH_PROVISIONING_APPLY_ENABLED", "false")
+AUTH_PROVISIONING_APPLY_ALLOWED_DOMAINS = os.getenv("AUTH_PROVISIONING_APPLY_ALLOWED_DOMAINS", "")
+AUTH_PROVISIONING_APPLY_ALLOWED_TENANTS = os.getenv("AUTH_PROVISIONING_APPLY_ALLOWED_TENANTS", "")
 _AUTH_REQUEST_ORIGIN = None
+_COGNITO_IDP_CLIENT = None
+_DYNAMODB_CLIENT = None
+_SSM_CLIENT = None
+_SECRETS_CLIENT = None
 
 AUTH_PATHS = {"/auth/runtime-config", "/auth/provisioning-plan", "/auth/provisioning-executor"}
 AUTH_PROFILE_STATUSES = {"active", "planned", "provisioning", "suspended", "failed"}
@@ -252,6 +266,7 @@ def authorize_bearer_for_domain(
 ) -> Dict[str, str]:
     registry = load_auth_registry_for_domain(domain)
     profile = _find_profile(registry, str(auth_profile_id or registry.get("defaultAuthProfileId") or ""))
+    profile = _profile_with_effective_auth_state(domain, profile)
     if _profile_status(profile) != "active":
         raise AuthJwtError()
 
@@ -288,6 +303,7 @@ def jwt_authorizer_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any
         auth_profile_id = _authorizer_profile_id(event)
         registry = load_auth_registry_for_domain(domain)
         profile = _find_profile(registry, auth_profile_id)
+        profile = _profile_with_effective_auth_state(domain, profile)
         if _profile_status(profile) != "active":
             raise AuthJwtError()
 
@@ -318,6 +334,7 @@ def _runtime_config_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     _enforce_runtime_origin_domain(_AUTH_REQUEST_ORIGIN, domain)
     registry = load_auth_registry_for_domain(domain)
     profile = _find_profile(registry, str(payload.get("authProfileId") or registry.get("defaultAuthProfileId") or ""))
+    profile = _profile_with_effective_auth_state(domain, profile)
     status = _profile_status(profile)
     auth_payload = _public_runtime_auth(profile, enabled=status == "active")
     return _auth_response(200, {"ok": True, "domain": domain, "auth": auth_payload})
@@ -426,18 +443,30 @@ def _provisioning_executor_response(event: Dict[str, Any], payload: Dict[str, An
     registry = load_auth_registry_for_domain(domain)
     profile = _find_profile(registry, str(payload.get("authProfileId") or registry.get("defaultAuthProfileId") or ""))
     plan = _cognito_plan(domain, profile)
-    _validate_executor_plan_key(payload, plan)
-    executor = _cognito_executor_preview(plan, mode=mode, requested_idempotency_key=payload.get("idempotencyKey"))
+    if mode != "apply":
+        _validate_executor_plan_key(payload, plan)
 
     if mode == "apply":
-        executor["operations"] = []
-        executor["blockedReason"] = "apply-not-implemented"
-        return _auth_response(501, {
-            "ok": False,
-            "error": "Cognito executor apply is not implemented",
-            "executor": executor,
+        if not _auth_provisioning_apply_enabled():
+            executor = _cognito_executor_preview(plan, mode=mode, requested_idempotency_key=payload.get("idempotencyKey"))
+            executor["operations"] = []
+            executor["blockedReason"] = "apply-disabled"
+            return _auth_response(501, {
+                "ok": False,
+                "error": "Cognito executor apply is disabled",
+                "executor": executor,
+        })
+        _validate_apply_request(event, payload, plan)
+        applied = _cognito_executor_apply(plan, requested_idempotency_key=payload.get("idempotencyKey"))
+        status_code = 200 if applied["executionStatus"] == "applied" else 500
+        return _auth_response(status_code, {
+            "ok": status_code == 200,
+            "domain": domain,
+            "executor": applied,
+            **({} if status_code == 200 else {"error": "Cognito provisioning apply failed"}),
         })
 
+    executor = _cognito_executor_preview(plan, mode=mode, requested_idempotency_key=payload.get("idempotencyKey"))
     return _auth_response(200, {"ok": True, "domain": domain, "executor": executor})
 
 
@@ -796,6 +825,48 @@ def _executor_idempotency_key(plan: Dict[str, Any], mode: str, requested_idempot
     return expected
 
 
+def _validate_apply_request(event: Dict[str, Any], payload: Dict[str, Any], plan: Dict[str, Any]) -> None:
+    if not str(payload.get("planKey") or "").strip():
+        raise AuthServiceError("Provisioning executor apply requires planKey")
+    if not str(payload.get("idempotencyKey") or "").strip():
+        raise AuthServiceError("Provisioning executor apply requires idempotencyKey")
+    _validate_executor_plan_key(payload, plan)
+    _executor_idempotency_key(plan, "apply", payload.get("idempotencyKey"))
+    caller_arn = _caller_arn(event)
+    allowed_arns = set(_csv_env("AUTH_PROVISIONING_ALLOWED_ROLE_ARNS", AUTH_PROVISIONING_ALLOWED_ROLE_ARNS))
+    if not caller_arn or caller_arn not in allowed_arns:
+        raise AuthUnauthorizedError("Provisioning apply access denied")
+    _validate_apply_domain_and_tenant(plan)
+    _validate_apply_redirect_ownership(plan)
+
+
+def _validate_apply_domain_and_tenant(plan: Dict[str, Any]) -> None:
+    allowed_domains = set(_csv_env("AUTH_PROVISIONING_APPLY_ALLOWED_DOMAINS", AUTH_PROVISIONING_APPLY_ALLOWED_DOMAINS))
+    allowed_tenants = set(_csv_env("AUTH_PROVISIONING_APPLY_ALLOWED_TENANTS", AUTH_PROVISIONING_APPLY_ALLOWED_TENANTS))
+    domain = str(plan.get("domain") or "").strip()
+    tenant_id = str(plan.get("tenantId") or "").strip()
+    if allowed_domains and domain not in allowed_domains:
+        raise AuthServiceError("Provisioning apply domain is not allowed")
+    if allowed_tenants and tenant_id not in allowed_tenants:
+        raise AuthServiceError("Provisioning apply tenant is not allowed")
+
+
+def _validate_apply_redirect_ownership(plan: Dict[str, Any]) -> None:
+    domain = str(plan.get("domain") or "").strip()
+    expected_outputs = plan.get("expectedOutputs") if isinstance(plan.get("expectedOutputs"), dict) else {}
+    for field_name in ("callbackUrls", "logoutUrls"):
+        for url in _string_list((expected_outputs or {}).get(field_name)):
+            parsed = urllib.parse.urlparse(url)
+            host = normalize_domain(parsed.hostname or "")
+            if not host:
+                raise AuthServiceError("Provisioning apply URL host is invalid")
+            if host == domain or host.endswith(f".{domain}"):
+                continue
+            if _origin_aliases_requested_domain(host, domain):
+                continue
+            raise AuthServiceError("Provisioning apply URL host is not allowed for domain")
+
+
 def _cognito_executor_preview(
     plan: Dict[str, Any],
     *,
@@ -844,6 +915,331 @@ def _cognito_executor_preview(
     }
 
 
+def _cognito_executor_apply(plan: Dict[str, Any], *, requested_idempotency_key: Any = None) -> Dict[str, Any]:
+    idempotency_key = _executor_idempotency_key(plan, "apply", requested_idempotency_key)
+    operations = [operation for operation in plan.get("operations", []) if isinstance(operation, dict)]
+    operation_outputs = _load_existing_operation_outputs(plan, operations)
+    provider_credentials = _preflight_social_identity_provider_credentials(plan)
+    applied_operations: list[Dict[str, Any]] = []
+
+    for operation in operations:
+        existing = _load_operation_state(plan, operation)
+        if _operation_state_succeeded(existing, operation):
+            outputs = _state_outputs(existing)
+            operation_outputs.update(outputs)
+            applied_operations.append(_applied_operation_result(operation, status="skipped", outputs=outputs))
+            continue
+
+        try:
+            _write_operation_state(plan, operation, status="in-progress", outputs={})
+            outputs = _execute_cognito_operation(
+                operation,
+                plan,
+                operation_outputs=operation_outputs,
+                provider_credentials=provider_credentials,
+            )
+            operation_outputs.update(outputs)
+            _write_operation_state(plan, operation, status="succeeded", outputs=outputs)
+            applied_operations.append(_applied_operation_result(operation, status="succeeded", outputs=outputs))
+        except Exception as exc:
+            if str(exc) != "Cognito provisioning operation is already in progress":
+                _write_operation_state(
+                    plan,
+                    operation,
+                    status="failed",
+                    outputs={},
+                    error_type=type(exc).__name__,
+                )
+            applied_operations.append(_applied_operation_result(
+                operation,
+                status="failed",
+                error_type=type(exc).__name__,
+            ))
+            return _executor_apply_response(
+                plan,
+                idempotency_key=idempotency_key,
+                execution_status="failed",
+                operations=applied_operations,
+                operation_outputs=operation_outputs,
+                error_type=type(exc).__name__,
+            )
+
+    _write_effective_auth_state(plan, operation_outputs)
+    return _executor_apply_response(
+        plan,
+        idempotency_key=idempotency_key,
+        execution_status="applied",
+        operations=applied_operations,
+        operation_outputs=operation_outputs,
+    )
+
+
+def _executor_apply_response(
+    plan: Dict[str, Any],
+    *,
+    idempotency_key: str,
+    execution_status: str,
+    operations: list[Dict[str, Any]],
+    operation_outputs: Dict[str, Any],
+    error_type: str = "",
+) -> Dict[str, Any]:
+    audit_event = {
+        "eventType": "cognito-provisioning-executor",
+        "auditKey": _stable_key(
+            "audit",
+            AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION,
+            str(plan.get("planKey") or ""),
+            idempotency_key,
+            "apply",
+            execution_status,
+        ),
+        "schemaVersion": AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION,
+        "mode": "apply",
+        "executionStatus": execution_status,
+        "planKey": str(plan.get("planKey") or ""),
+        "configHash": str(plan.get("configHash") or ""),
+        "idempotencyKey": idempotency_key,
+        "domain": str(plan.get("domain") or ""),
+        "authProfileId": str(plan.get("authProfileId") or ""),
+        "operationCount": len(operations),
+        "mutationAttempted": True,
+    }
+    if error_type:
+        audit_event["errorType"] = error_type
+
+    response = {
+        "schemaVersion": AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION,
+        "provider": "cognito",
+        "mode": "apply",
+        "executionStatus": execution_status,
+        "planVersion": str(plan.get("planVersion") or ""),
+        "planKey": str(plan.get("planKey") or ""),
+        "configHash": str(plan.get("configHash") or ""),
+        "idempotencyKey": idempotency_key,
+        "target": {
+            "domain": str(plan.get("domain") or ""),
+            "authProfileId": str(plan.get("authProfileId") or ""),
+        },
+        "operations": operations,
+        "outputs": _sanitize_apply_outputs(operation_outputs),
+        "auditEvent": audit_event,
+    }
+    if error_type:
+        response["errorType"] = error_type
+    return response
+
+
+def _execute_cognito_operation(
+    operation: Dict[str, Any],
+    plan: Dict[str, Any],
+    *,
+    operation_outputs: Dict[str, Any],
+    provider_credentials: Dict[str, Dict[str, str]],
+) -> Dict[str, Any]:
+    operation_id = str(operation.get("operationId") or "")
+    if operation_id == "ensure-user-pool":
+        return _ensure_cognito_user_pool(plan, operation_outputs)
+    if operation_id == "ensure-hosted-ui-domain":
+        return _ensure_cognito_hosted_ui_domain(plan, operation_outputs)
+    if operation_id == "ensure-public-client":
+        return _ensure_cognito_public_client(plan, operation_outputs)
+    if operation_id == "ensure-user-groups":
+        return _ensure_cognito_user_groups(plan, operation_outputs)
+    if operation_id == "ensure-social-identity-providers":
+        return _ensure_cognito_social_identity_providers(plan, operation_outputs, provider_credentials)
+    if operation_id == "finalize-runtime-activation":
+        return _finalize_cognito_runtime_activation(plan, operation_outputs)
+    raise AuthServiceError("Unsupported Cognito provisioning operation")
+
+
+def _ensure_cognito_user_pool(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> Dict[str, Any]:
+    existing_pool_id = str(operation_outputs.get("userPoolId") or "").strip()
+    if existing_pool_id:
+        _cognito_idp().describe_user_pool(UserPoolId=existing_pool_id)
+        return {"userPoolId": existing_pool_id}
+
+    pool_name = _cognito_resource_name(plan, "user-pool")
+    reconciled_pool_id = _find_cognito_user_pool_by_name(plan, pool_name)
+    if reconciled_pool_id:
+        return {
+            "userPoolId": reconciled_pool_id,
+            "issuer": f"https://cognito-idp.{_aws_region()}.amazonaws.com/{reconciled_pool_id}",
+        }
+
+    response = _cognito_idp().create_user_pool(
+        PoolName=pool_name,
+        UsernameAttributes=["email"],
+        AutoVerifiedAttributes=["email"],
+        Schema=[
+            {
+                "Name": "email",
+                "AttributeDataType": "String",
+                "Mutable": True,
+                "Required": True,
+            },
+            {
+                "Name": "tenant_id",
+                "AttributeDataType": "String",
+                "Mutable": True,
+                "Required": False,
+                "StringAttributeConstraints": {"MinLength": "1", "MaxLength": "80"},
+            },
+        ],
+        Policies={
+            "PasswordPolicy": {
+                "MinimumLength": 12,
+                "RequireLowercase": True,
+                "RequireNumbers": True,
+                "RequireSymbols": False,
+                "RequireUppercase": True,
+            },
+        },
+        UserPoolTags=_cognito_resource_tags(plan),
+    )
+    user_pool_id = str(((response.get("UserPool") or {}).get("Id")) or "").strip()
+    if not user_pool_id:
+        raise AuthServiceError("Cognito user pool creation did not return an id")
+    return {
+        "userPoolId": user_pool_id,
+        "issuer": f"https://cognito-idp.{_aws_region()}.amazonaws.com/{user_pool_id}",
+    }
+
+
+def _ensure_cognito_hosted_ui_domain(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> Dict[str, Any]:
+    user_pool_id = _required_output(operation_outputs, "userPoolId")
+    domain_prefix = _hosted_ui_domain_prefix(plan)
+    describe = _safe_cognito_call(
+        "describe_user_pool_domain",
+        Domain=domain_prefix,
+    )
+    domain_description = describe.get("DomainDescription") if isinstance(describe, dict) else {}
+    existing_pool_id = str((domain_description or {}).get("UserPoolId") or "").strip()
+    if existing_pool_id:
+        if existing_pool_id != user_pool_id:
+            raise AuthServiceError("Hosted UI domain belongs to another user pool")
+    else:
+        _cognito_idp().create_user_pool_domain(Domain=domain_prefix, UserPoolId=user_pool_id)
+    return {
+        "hostedUiDomainPrefix": domain_prefix,
+        "hostedUiDomain": f"https://{domain_prefix}.auth.{_aws_region()}.amazoncognito.com",
+    }
+
+
+def _ensure_cognito_public_client(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> Dict[str, Any]:
+    user_pool_id = _required_output(operation_outputs, "userPoolId")
+    existing_client_id = str(operation_outputs.get("userPoolClientId") or "").strip()
+    supported_providers = _supported_identity_provider_names(plan, include_social=False)
+    if existing_client_id:
+        _validate_cognito_public_client(user_pool_id, existing_client_id)
+        _update_cognito_public_client(plan, user_pool_id, existing_client_id, supported_providers)
+        return {"userPoolClientId": existing_client_id, "clientId": existing_client_id}
+
+    public_client = (plan.get("runtimeAuth") or {}).get("publicClient") if isinstance(plan.get("runtimeAuth"), dict) else {}
+    client_name = _cognito_resource_name(plan, "public-client")
+    reconciled_client_id = _find_cognito_user_pool_client_by_name(user_pool_id, client_name)
+    if reconciled_client_id:
+        _validate_cognito_public_client(user_pool_id, reconciled_client_id)
+        _update_cognito_public_client(plan, user_pool_id, reconciled_client_id, supported_providers)
+        return {"userPoolClientId": reconciled_client_id, "clientId": reconciled_client_id}
+
+    response = _cognito_idp().create_user_pool_client(
+        UserPoolId=user_pool_id,
+        ClientName=client_name,
+        GenerateSecret=False,
+        PreventUserExistenceErrors="ENABLED",
+        SupportedIdentityProviders=supported_providers,
+        AllowedOAuthFlowsUserPoolClient=True,
+        AllowedOAuthFlows=["code"],
+        AllowedOAuthScopes=_string_list((public_client or {}).get("scopes")) or ["openid", "email", "profile"],
+        CallbackURLs=_string_list((public_client or {}).get("callbackUrls")),
+        LogoutURLs=_string_list((public_client or {}).get("logoutUrls")),
+        ExplicitAuthFlows=["ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH"],
+    )
+    client_id = str(((response.get("UserPoolClient") or {}).get("ClientId")) or "").strip()
+    if not client_id:
+        raise AuthServiceError("Cognito app client creation did not return an id")
+    return {"userPoolClientId": client_id, "clientId": client_id}
+
+
+def _ensure_cognito_user_groups(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> Dict[str, Any]:
+    user_pool_id = _required_output(operation_outputs, "userPoolId")
+    desired_groups = _string_list((plan.get("groups") or {}).get("allowed") if isinstance(plan.get("groups"), dict) else [])
+    existing_groups = _list_cognito_groups(user_pool_id)
+    created: list[str] = []
+    for group_name in desired_groups:
+        if group_name in existing_groups:
+            continue
+        _cognito_idp().create_group(
+            UserPoolId=user_pool_id,
+            GroupName=group_name,
+            Description=f"Zoolanding auth group {group_name}",
+        )
+        created.append(group_name)
+    return {"groups": desired_groups, "createdGroups": created}
+
+
+def _ensure_cognito_social_identity_providers(
+    plan: Dict[str, Any],
+    operation_outputs: Dict[str, Any],
+    provider_credentials: Dict[str, Dict[str, str]],
+) -> Dict[str, Any]:
+    user_pool_id = _required_output(operation_outputs, "userPoolId")
+    client_id = _required_output(operation_outputs, "userPoolClientId")
+    provider_names: list[str] = []
+    for provider in plan.get("socialIdentityProviders") or []:
+        if not isinstance(provider, dict) or not provider.get("enabled", True):
+            continue
+        provider_name = _cognito_provider_name(provider)
+        credentials = provider_credentials.get(str(provider.get("providerId") or ""))
+        if not credentials:
+            raise AuthServiceError("Social identity provider credentials are missing")
+        provider_details = _cognito_provider_details(provider, credentials)
+        attribute_mapping = _cognito_provider_attribute_mapping(provider)
+        existing = _safe_cognito_call(
+            "describe_identity_provider",
+            UserPoolId=user_pool_id,
+            ProviderName=provider_name,
+        )
+        if existing:
+            _cognito_idp().update_identity_provider(
+                UserPoolId=user_pool_id,
+                ProviderName=provider_name,
+                ProviderDetails=provider_details,
+                AttributeMapping=attribute_mapping,
+            )
+        else:
+            _cognito_idp().create_identity_provider(
+                UserPoolId=user_pool_id,
+                ProviderName=provider_name,
+                ProviderType=_cognito_provider_type(provider),
+                ProviderDetails=provider_details,
+                AttributeMapping=attribute_mapping,
+            )
+        provider_names.append(provider_name)
+
+    _update_cognito_public_client(
+        plan,
+        user_pool_id,
+        client_id,
+        _supported_identity_provider_names(plan, include_social=True),
+    )
+    return {"identityProviders": provider_names}
+
+
+def _finalize_cognito_runtime_activation(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> Dict[str, Any]:
+    user_pool_id = _required_output(operation_outputs, "userPoolId")
+    client_id = _required_output(operation_outputs, "userPoolClientId")
+    hosted_ui_domain = _required_output(operation_outputs, "hostedUiDomain")
+    return {
+        "activation": {
+            "status": "active",
+            "issuer": f"https://cognito-idp.{_aws_region()}.amazonaws.com/{user_pool_id}",
+            "clientId": client_id,
+            "hostedUiDomain": hosted_ui_domain,
+        }
+    }
+
+
 def _executor_operation_preview(operation: Dict[str, Any]) -> Dict[str, Any]:
     sanitized = {
         "operationId": str(operation.get("operationId") or ""),
@@ -862,6 +1258,660 @@ def _executor_operation_preview(operation: Dict[str, Any]) -> Dict[str, Any]:
         "authProfileId": str(target.get("authProfileId") or ""),
     }
     return sanitized
+
+
+def _applied_operation_result(
+    operation: Dict[str, Any],
+    *,
+    status: str,
+    outputs: Optional[Dict[str, Any]] = None,
+    error_type: str = "",
+) -> Dict[str, Any]:
+    result = _executor_operation_preview(operation)
+    result["status"] = status
+    result["willMutate"] = status != "skipped"
+    sanitized_outputs = _sanitize_apply_outputs(outputs or {})
+    if sanitized_outputs:
+        result["outputs"] = sanitized_outputs
+    if error_type:
+        result["errorType"] = error_type
+    return result
+
+
+def _auth_provisioning_apply_enabled() -> bool:
+    return str(os.getenv("AUTH_PROVISIONING_APPLY_ENABLED", AUTH_PROVISIONING_APPLY_ENABLED)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _load_existing_operation_outputs(plan: Dict[str, Any], operations: list[Dict[str, Any]]) -> Dict[str, Any]:
+    outputs: Dict[str, Any] = {}
+    for operation in operations:
+        state = _load_operation_state(plan, operation)
+        if _operation_state_succeeded(state, operation):
+            outputs.update(_state_outputs(state))
+    return outputs
+
+
+def _operation_state_succeeded(state: Dict[str, Any], operation: Dict[str, Any]) -> bool:
+    if not state:
+        return False
+    return (
+        state.get("status") == "succeeded"
+        and state.get("operationId") == operation.get("operationId")
+        and state.get("idempotencyKey") == operation.get("idempotencyKey")
+    )
+
+
+def _load_operation_state(plan: Dict[str, Any], operation: Dict[str, Any]) -> Dict[str, Any]:
+    table_name = _provisioning_state_table_name()
+    key = _operation_state_key(plan, operation)
+    response = _dynamodb().get_item(
+        TableName=table_name,
+        Key={
+            "pk": {"S": key["pk"]},
+            "sk": {"S": key["sk"]},
+        },
+        ConsistentRead=True,
+    )
+    return _from_dynamodb_item(response.get("Item") or {})
+
+
+def _write_operation_state(
+    plan: Dict[str, Any],
+    operation: Dict[str, Any],
+    *,
+    status: str,
+    outputs: Dict[str, Any],
+    error_type: str = "",
+) -> None:
+    table_name = _provisioning_state_table_name()
+    key = _operation_state_key(plan, operation)
+    item = {
+        "pk": {"S": key["pk"]},
+        "sk": {"S": key["sk"]},
+        "recordType": {"S": "operation"},
+        "domain": {"S": str(plan.get("domain") or "")},
+        "authProfileId": {"S": str(plan.get("authProfileId") or "")},
+        "tenantId": {"S": str(plan.get("tenantId") or "")},
+        "planKey": {"S": str(plan.get("planKey") or "")},
+        "configHash": {"S": str(plan.get("configHash") or "")},
+        "operationId": {"S": str(operation.get("operationId") or "")},
+        "idempotencyKey": {"S": str(operation.get("idempotencyKey") or "")},
+        "status": {"S": status},
+        "outputsJson": {"S": json.dumps(_sanitize_apply_outputs(outputs), sort_keys=True, separators=(",", ":"))},
+    }
+    if error_type:
+        item["errorType"] = {"S": error_type}
+    kwargs: Dict[str, Any] = {"TableName": table_name, "Item": item}
+    if status == "in-progress":
+        item["lockExpiresAt"] = {"N": str(int(time.time()) + 900)}
+        kwargs["ConditionExpression"] = (
+            "attribute_not_exists(pk) OR #status = :failed OR "
+            "(#status = :inProgress AND lockExpiresAt < :now)"
+        )
+        kwargs["ExpressionAttributeNames"] = {"#status": "status"}
+        kwargs["ExpressionAttributeValues"] = {
+            ":failed": {"S": "failed"},
+            ":inProgress": {"S": "in-progress"},
+            ":now": {"N": str(int(time.time()))},
+        }
+    try:
+        _dynamodb().put_item(**kwargs)
+    except Exception as exc:
+        if exc.__class__.__name__ == "ConditionalCheckFailedException":
+            raise AuthServiceError("Cognito provisioning operation is already in progress") from exc
+        raise
+
+
+def _profile_with_effective_auth_state(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        plan = _cognito_plan(domain, profile)
+        state = _load_effective_auth_state(plan)
+    except Exception as exc:
+        log("WARNING", "Unable to load effective auth state", domain=domain, authProfileId=_profile_id(profile), errorType=type(exc).__name__)
+        return profile
+    if state.get("status") != "active":
+        return profile
+    if state.get("configHash") != plan.get("configHash"):
+        return profile
+    runtime_auth = state.get("runtimeAuth") if isinstance(state.get("runtimeAuth"), dict) else {}
+    client_id = str(runtime_auth.get("clientId") or "").strip()
+    issuer = str(runtime_auth.get("issuer") or "").strip()
+    hosted_ui_domain = str(runtime_auth.get("hostedUiDomain") or "").strip()
+    if not client_id or not issuer or not hosted_ui_domain:
+        return profile
+    merged = dict(profile)
+    merged.update({
+        "status": "active",
+        "issuer": issuer,
+        "hostedUiDomain": hosted_ui_domain,
+        "clientId": client_id,
+        "audiences": [client_id],
+        "jwksUrl": _jwks_url(issuer),
+        "userPoolId": str(runtime_auth.get("userPoolId") or "").strip(),
+    })
+    return merged
+
+
+def _load_effective_auth_state(plan: Dict[str, Any]) -> Dict[str, Any]:
+    table_name = str(os.getenv("AUTH_PROVISIONING_STATE_TABLE_NAME", AUTH_PROVISIONING_STATE_TABLE_NAME)).strip()
+    if not table_name or boto3 is None:
+        return {}
+    key = _auth_state_key(plan)
+    response = _dynamodb().get_item(
+        TableName=table_name,
+        Key={"pk": {"S": key["pk"]}, "sk": {"S": key["sk"]}},
+        ConsistentRead=True,
+    )
+    item = _from_dynamodb_item(response.get("Item") or {})
+    runtime_auth = str(item.get("runtimeAuthJson") or "").strip()
+    if runtime_auth:
+        try:
+            parsed = json.loads(runtime_auth)
+            item["runtimeAuth"] = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            item["runtimeAuth"] = {}
+    return item
+
+
+def _write_effective_auth_state(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> None:
+    table_name = _provisioning_state_table_name()
+    key = _auth_state_key(plan)
+    activation = operation_outputs.get("activation") if isinstance(operation_outputs.get("activation"), dict) else {}
+    runtime_auth = {
+        "status": "active",
+        "issuer": str((activation or {}).get("issuer") or operation_outputs.get("issuer") or ""),
+        "hostedUiDomain": str((activation or {}).get("hostedUiDomain") or operation_outputs.get("hostedUiDomain") or ""),
+        "clientId": str((activation or {}).get("clientId") or operation_outputs.get("clientId") or operation_outputs.get("userPoolClientId") or ""),
+        "userPoolId": str(operation_outputs.get("userPoolId") or ""),
+    }
+    item = {
+        "pk": {"S": key["pk"]},
+        "sk": {"S": key["sk"]},
+        "recordType": {"S": "auth-state"},
+        "status": {"S": "active"},
+        "domain": {"S": str(plan.get("domain") or "")},
+        "authProfileId": {"S": str(plan.get("authProfileId") or "")},
+        "tenantId": {"S": str(plan.get("tenantId") or "")},
+        "planKey": {"S": str(plan.get("planKey") or "")},
+        "configHash": {"S": str(plan.get("configHash") or "")},
+        "runtimeAuthJson": {"S": json.dumps(runtime_auth, sort_keys=True, separators=(",", ":"))},
+    }
+    _dynamodb().put_item(TableName=table_name, Item=item)
+
+
+def _auth_state_key(plan: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "pk": "AUTH#{}#{}".format(str(plan.get("domain") or ""), str(plan.get("authProfileId") or "")),
+        "sk": "STATE",
+    }
+
+
+def _operation_state_key(plan: Dict[str, Any], operation: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "pk": "AUTH#{}#{}".format(
+            str(plan.get("domain") or ""),
+            str(plan.get("authProfileId") or ""),
+        ),
+        "sk": "OP#{}#{}#{}".format(
+            str(plan.get("configHash") or ""),
+            str(operation.get("operationId") or ""),
+            str(operation.get("idempotencyKey") or ""),
+        ),
+    }
+
+
+def _state_outputs(state: Dict[str, Any]) -> Dict[str, Any]:
+    raw = str(state.get("outputsJson") or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _from_dynamodb_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    parsed: Dict[str, Any] = {}
+    for key, value in item.items():
+        if isinstance(value, dict):
+            if "S" in value:
+                parsed[key] = value.get("S")
+            elif "N" in value:
+                parsed[key] = value.get("N")
+            elif "BOOL" in value:
+                parsed[key] = value.get("BOOL")
+    return parsed
+
+
+def _preflight_social_identity_provider_credentials(plan: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    credentials: Dict[str, Dict[str, str]] = {}
+    for provider in plan.get("socialIdentityProviders") or []:
+        if not isinstance(provider, dict) or not provider.get("enabled", True):
+            continue
+        provider_id = str(provider.get("providerId") or "").strip()
+        credentials[provider_id] = _resolve_social_identity_provider_credentials(provider, plan)
+    return credentials
+
+
+def _resolve_social_identity_provider_credentials(provider: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, str]:
+    secret_refs = provider.get("secretRefs") if isinstance(provider.get("secretRefs"), dict) else {}
+    merged: Dict[str, str] = {}
+    provider_ref = str(secret_refs.get("provider") or "").strip()
+    if provider_ref:
+        merged.update(_secret_ref_object(provider_ref, plan))
+
+    client_id_ref = str(secret_refs.get("clientId") or "").strip()
+    client_secret_ref = str(secret_refs.get("clientSecret") or "").strip()
+    if client_id_ref:
+        merged["clientId"] = _secret_ref_string(client_id_ref, plan, preferred_key="clientId")
+    if client_secret_ref:
+        merged["clientSecret"] = _secret_ref_string(client_secret_ref, plan, preferred_key="clientSecret")
+
+    client_id = str(merged.get("clientId") or merged.get("client_id") or "").strip()
+    client_secret = str(merged.get("clientSecret") or merged.get("client_secret") or "").strip()
+    _reject_placeholder_secret_value(client_id)
+    _reject_placeholder_secret_value(client_secret)
+    if not client_id or not client_secret:
+        raise AuthServiceError("Social identity provider credentials are incomplete")
+    return {"clientId": client_id, "clientSecret": client_secret}
+
+
+def _secret_ref_object(secret_ref: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+    parsed = _load_secret_ref(secret_ref, plan)
+    if isinstance(parsed, dict):
+        return parsed
+    raise AuthServiceError("Social identity provider credential secret must be a JSON object")
+
+
+def _secret_ref_string(secret_ref: str, plan: Dict[str, Any], *, preferred_key: str) -> str:
+    parsed = _load_secret_ref(secret_ref, plan)
+    if isinstance(parsed, str):
+        return parsed.strip()
+    if isinstance(parsed, dict):
+        value = parsed.get(preferred_key) or parsed.get(_snake_case(preferred_key))
+        if isinstance(value, str):
+            return value.strip()
+    raise AuthServiceError("Social identity provider credential secret is invalid")
+
+
+def _load_secret_ref(secret_ref: str, plan: Dict[str, Any]) -> Any:
+    _validate_secret_ref_value(secret_ref, "socialIdentityProviders.secretRefs")
+    _validate_secret_ref_scope(secret_ref, plan)
+    if ":secret:" in str(secret_ref):
+        return _load_secrets_manager_ref(secret_ref)
+    ssm_value = _load_ssm_secret_ref(secret_ref)
+    if ssm_value is not None:
+        return ssm_value
+    return _load_secrets_manager_ref(secret_ref)
+
+
+def _validate_secret_ref_scope(secret_ref: str, plan: Dict[str, Any]) -> None:
+    ref = str(secret_ref or "").strip()
+    tenant_id = str(plan.get("tenantId") or "").strip()
+    if not tenant_id:
+        raise AuthServiceError("Provisioning tenant is missing")
+    allowed_path_prefix = f"/zoolanding/auth/{tenant_id}/"
+    allowed_ssm_arn_fragment = f":parameter/zoolanding/auth/{tenant_id}/"
+    allowed_secret_arn_fragment = f":secret:/zoolanding/auth/{tenant_id}/"
+    if ref.startswith(allowed_path_prefix):
+        return
+    if ":parameter/" in ref and allowed_ssm_arn_fragment in ref:
+        return
+    if ":secret:" in ref and allowed_secret_arn_fragment in ref:
+        return
+    raise AuthServiceError("Social identity provider credential reference is outside tenant scope")
+
+
+def _reject_placeholder_secret_value(value: str) -> None:
+    normalized = str(value or "").strip().lower()
+    placeholders = {
+        "",
+        "__set_in_aws_console__",
+        "__set_me__",
+        "changeme",
+        "change-me",
+        "todo",
+        "placeholder",
+        "replace-me",
+    }
+    if normalized in placeholders or normalized.startswith("fake-"):
+        raise AuthServiceError("Social identity provider credential secret is not configured")
+
+
+def _load_ssm_secret_ref(secret_ref: str) -> Any:
+    try:
+        response = _ssm().get_parameter(Name=secret_ref, WithDecryption=True)
+    except Exception as exc:
+        if exc.__class__.__name__ == "ParameterNotFound":
+            return None
+        raise
+    raw = (response.get("Parameter") or {}).get("Value")
+    return _parse_secret_ref_payload(raw)
+
+
+def _load_secrets_manager_ref(secret_ref: str) -> Any:
+    try:
+        response = _secrets_manager().get_secret_value(SecretId=secret_ref)
+    except Exception as exc:
+        if exc.__class__.__name__ in {"ResourceNotFoundException", "KeyError"}:
+            raise AuthServiceError("Social identity provider credential secret is invalid") from exc
+        raise
+    raw = response.get("SecretString")
+    return _parse_secret_ref_payload(raw)
+
+
+def _parse_secret_ref_payload(raw: Any) -> Any:
+    if not isinstance(raw, str) or not raw.strip():
+        raise AuthServiceError("Social identity provider credential secret is missing")
+    stripped = raw.strip()
+    if stripped.startswith("{"):
+        parsed = json.loads(stripped)
+        if not isinstance(parsed, dict):
+            raise AuthServiceError("Social identity provider credential secret is invalid")
+        return parsed
+    return stripped
+
+
+def _sanitize_apply_outputs(outputs: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {
+        "activation",
+        "clientId",
+        "createdGroups",
+        "groups",
+        "hostedUiDomain",
+        "hostedUiDomainPrefix",
+        "identityProviders",
+        "issuer",
+        "userPoolClientId",
+        "userPoolId",
+    }
+    sanitized: Dict[str, Any] = {}
+    for key, value in (outputs or {}).items():
+        if key not in allowed:
+            continue
+        if isinstance(value, dict):
+            sanitized[key] = _sanitize_apply_outputs(value)
+        elif isinstance(value, list):
+            sanitized[key] = [str(item) for item in value if str(item).strip()]
+        elif isinstance(value, (str, bool, int, float)) or value is None:
+            sanitized[key] = value
+    return sanitized
+
+
+def _required_output(outputs: Dict[str, Any], key: str) -> str:
+    value = str(outputs.get(key) or "").strip()
+    if not value:
+        raise AuthServiceError(f"Cognito provisioning output {key} is missing")
+    return value
+
+
+def _cognito_resource_name(plan: Dict[str, Any], suffix: str) -> str:
+    base = "-".join((
+        "zoolanding",
+        _safe_name_segment(str(plan.get("domain") or "domain")),
+        _safe_name_segment(str(plan.get("tenantId") or "tenant")),
+        _safe_name_segment(str(plan.get("authProfileId") or "auth")),
+        suffix,
+    ))
+    return base[:128].strip("-") or f"zoolanding-{suffix}"
+
+
+def _cognito_resource_tags(plan: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "managedBy": "zoolandingpage",
+        "domain": str(plan.get("domain") or ""),
+        "tenantId": str(plan.get("tenantId") or ""),
+        "authProfileId": str(plan.get("authProfileId") or ""),
+        "configHash": str(plan.get("configHash") or ""),
+    }
+
+
+def _safe_name_segment(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9-]+", "-", str(value or "").strip().lower())
+    return re.sub(r"-{2,}", "-", normalized).strip("-") or "default"
+
+
+def _hosted_ui_domain_prefix(plan: Dict[str, Any]) -> str:
+    hosted_ui = plan.get("hostedUi") if isinstance(plan.get("hostedUi"), dict) else {}
+    domain_host = str((hosted_ui or {}).get("domainHost") or "").strip().lower()
+    if not domain_host:
+        raise AuthServiceError("Hosted UI domain is missing")
+    suffix = f".auth.{_aws_region()}.amazoncognito.com"
+    if domain_host.endswith(suffix):
+        return domain_host[: -len(suffix)]
+    return domain_host.split(".", 1)[0]
+
+
+def _list_cognito_groups(user_pool_id: str) -> set[str]:
+    groups: set[str] = set()
+    kwargs: Dict[str, Any] = {"UserPoolId": user_pool_id, "Limit": 60}
+    while True:
+        response = _cognito_idp().list_groups(**kwargs)
+        for group in response.get("Groups") or []:
+            name = str(group.get("GroupName") or "").strip()
+            if name:
+                groups.add(name)
+        token = response.get("NextToken")
+        if not token:
+            return groups
+        kwargs["NextToken"] = token
+
+
+def _find_cognito_user_pool_by_name(plan: Dict[str, Any], pool_name: str) -> str:
+    matches: list[str] = []
+    kwargs: Dict[str, Any] = {"MaxResults": 60}
+    while True:
+        response = _cognito_idp().list_user_pools(**kwargs)
+        for user_pool in response.get("UserPools") or []:
+            if str(user_pool.get("Name") or "") == pool_name:
+                pool_id = str(user_pool.get("Id") or "").strip()
+                if pool_id:
+                    matches.append(pool_id)
+        token = response.get("NextToken")
+        if not token:
+            break
+        kwargs["NextToken"] = token
+
+    if len(matches) > 1:
+        raise AuthServiceError("Multiple Cognito user pools match the planned name")
+    if not matches:
+        return ""
+    _validate_cognito_user_pool_tags(plan, matches[0])
+    return matches[0]
+
+
+def _validate_cognito_user_pool_tags(plan: Dict[str, Any], user_pool_id: str) -> None:
+    response = _cognito_idp().describe_user_pool(UserPoolId=user_pool_id)
+    user_pool = response.get("UserPool") if isinstance(response, dict) else {}
+    arn = str((user_pool or {}).get("Arn") or "").strip()
+    if not arn:
+        raise AuthServiceError("Cognito user pool cannot be reconciled without an ARN")
+    tags_response = _cognito_idp().list_tags_for_resource(ResourceArn=arn)
+    actual_tags = tags_response.get("Tags") if isinstance(tags_response, dict) else {}
+    expected_tags = _cognito_resource_tags(plan)
+    for key in ("managedBy", "domain", "tenantId", "authProfileId"):
+        if str((actual_tags or {}).get(key) or "") != expected_tags[key]:
+            raise AuthServiceError("Cognito user pool name is already used outside this auth profile")
+
+
+def _find_cognito_user_pool_client_by_name(user_pool_id: str, client_name: str) -> str:
+    matches: list[str] = []
+    kwargs: Dict[str, Any] = {"UserPoolId": user_pool_id, "MaxResults": 60}
+    while True:
+        response = _cognito_idp().list_user_pool_clients(**kwargs)
+        for client in response.get("UserPoolClients") or []:
+            if str(client.get("ClientName") or "") == client_name:
+                client_id = str(client.get("ClientId") or "").strip()
+                if client_id:
+                    matches.append(client_id)
+        token = response.get("NextToken")
+        if not token:
+            break
+        kwargs["NextToken"] = token
+
+    if len(matches) > 1:
+        raise AuthServiceError("Multiple Cognito app clients match the planned name")
+    return matches[0] if matches else ""
+
+
+def _validate_cognito_public_client(user_pool_id: str, client_id: str) -> None:
+    response = _cognito_idp().describe_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id)
+    user_pool_client = response.get("UserPoolClient") if isinstance(response, dict) else {}
+    if str((user_pool_client or {}).get("ClientSecret") or "").strip():
+        raise AuthServiceError("Existing Cognito app client is not public")
+
+
+def _supported_identity_provider_names(plan: Dict[str, Any], *, include_social: bool) -> list[str]:
+    providers = ["COGNITO"]
+    if include_social:
+        for provider in plan.get("socialIdentityProviders") or []:
+            if isinstance(provider, dict) and provider.get("enabled", True):
+                providers.append(_cognito_provider_name(provider))
+    return providers
+
+
+def _update_cognito_public_client(
+    plan: Dict[str, Any],
+    user_pool_id: str,
+    client_id: str,
+    supported_identity_providers: list[str],
+) -> None:
+    public_client = (plan.get("runtimeAuth") or {}).get("publicClient") if isinstance(plan.get("runtimeAuth"), dict) else {}
+    _cognito_idp().update_user_pool_client(
+        UserPoolId=user_pool_id,
+        ClientId=client_id,
+        SupportedIdentityProviders=supported_identity_providers,
+        AllowedOAuthFlowsUserPoolClient=True,
+        AllowedOAuthFlows=["code"],
+        AllowedOAuthScopes=_string_list((public_client or {}).get("scopes")) or ["openid", "email", "profile"],
+        CallbackURLs=_string_list((public_client or {}).get("callbackUrls")),
+        LogoutURLs=_string_list((public_client or {}).get("logoutUrls")),
+        ExplicitAuthFlows=["ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH"],
+        PreventUserExistenceErrors="ENABLED",
+    )
+
+
+def _cognito_provider_name(provider: Dict[str, Any]) -> str:
+    provider_type = str(provider.get("providerType") or "").strip().lower()
+    if provider_type == "google":
+        return "Google"
+    if provider_type == "facebook":
+        return "Facebook"
+    return str(provider.get("providerId") or provider_type).strip()
+
+
+def _cognito_provider_type(provider: Dict[str, Any]) -> str:
+    provider_type = str(provider.get("providerType") or "").strip().lower()
+    if provider_type == "google":
+        return "Google"
+    if provider_type == "facebook":
+        return "Facebook"
+    if provider_type == "oidc":
+        return "OIDC"
+    return provider_type.upper()
+
+
+def _cognito_provider_details(provider: Dict[str, Any], credentials: Dict[str, str]) -> Dict[str, str]:
+    provider_type = str(provider.get("providerType") or "").strip().lower()
+    if provider_type == "facebook":
+        scopes = ",".join(_string_list(provider.get("scopes")) or ["public_profile", "email"])
+    else:
+        scopes = " ".join(_string_list(provider.get("scopes")) or ["email", "profile", "openid"])
+    details = {
+        "client_id": credentials["clientId"],
+        "client_secret": credentials["clientSecret"],
+        "authorize_scopes": scopes,
+    }
+    if provider_type == "facebook":
+        details["api_version"] = str(provider.get("apiVersion") or "v17.0")
+    if provider_type == "oidc":
+        oidc_mapping = {
+            "issuer": "oidc_issuer",
+            "authorizeUrl": "authorize_url",
+            "tokenUrl": "token_url",
+            "userInfoUrl": "attributes_url",
+            "jwksUrl": "jwks_uri",
+            "attributeRequestMethod": "attributes_request_method",
+        }
+        for source_key, target_key in oidc_mapping.items():
+            value = str(provider.get(source_key) or "").strip()
+            if value:
+                details[target_key] = value
+    return details
+
+
+def _cognito_provider_attribute_mapping(provider: Dict[str, Any]) -> Dict[str, str]:
+    provider_type = str(provider.get("providerType") or "").strip().lower()
+    if provider_type == "facebook":
+        return {"email": "email", "name": "name"}
+    return {"email": "email"}
+
+
+def _safe_cognito_call(method_name: str, **kwargs: Any) -> Dict[str, Any]:
+    method = getattr(_cognito_idp(), method_name)
+    try:
+        return method(**kwargs)
+    except Exception as exc:
+        if exc.__class__.__name__ in {"ResourceNotFoundException", "InvalidParameterException"}:
+            return {}
+        raise
+
+
+def _provisioning_state_table_name() -> str:
+    table_name = str(os.getenv("AUTH_PROVISIONING_STATE_TABLE_NAME", AUTH_PROVISIONING_STATE_TABLE_NAME)).strip()
+    if not table_name:
+        raise AuthServiceError("Auth provisioning state table is not configured")
+    return table_name
+
+
+def _aws_region() -> str:
+    return str(os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1").strip()
+
+
+def _cognito_idp():
+    global _COGNITO_IDP_CLIENT
+    if boto3 is None:
+        raise RuntimeError("boto3 is not available")
+    if _COGNITO_IDP_CLIENT is None:
+        _COGNITO_IDP_CLIENT = boto3.client("cognito-idp")
+    return _COGNITO_IDP_CLIENT
+
+
+def _dynamodb():
+    global _DYNAMODB_CLIENT
+    if boto3 is None:
+        raise RuntimeError("boto3 is not available")
+    if _DYNAMODB_CLIENT is None:
+        _DYNAMODB_CLIENT = boto3.client("dynamodb")
+    return _DYNAMODB_CLIENT
+
+
+def _ssm():
+    global _SSM_CLIENT
+    if boto3 is None:
+        raise RuntimeError("boto3 is not available")
+    if _SSM_CLIENT is None:
+        _SSM_CLIENT = boto3.client("ssm")
+    return _SSM_CLIENT
+
+
+def _secrets_manager():
+    global _SECRETS_CLIENT
+    if boto3 is None:
+        raise RuntimeError("boto3 is not available")
+    if _SECRETS_CLIENT is None:
+        _SECRETS_CLIENT = boto3.client("secretsmanager")
+    return _SECRETS_CLIENT
+
+
+def _snake_case(value: str) -> str:
+    return re.sub(r"(?<!^)([A-Z])", r"_\1", value).lower()
 
 
 def _is_trusted_server_request(event: Dict[str, Any]) -> bool:

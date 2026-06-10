@@ -9,6 +9,20 @@ Current base evidence at authoring time:
 - Merge history includes PR #5: `768fbb7 Merge pull request #5 from LynxPardelle/codex/auth-cognito-executor-scaffold`
 - Scope here is documentation only. No deploy, AWS CLI, CloudFormation, Cognito, SSM, Secrets Manager, or real secret/token work is approved by this document.
 
+Update at 2026-06-09 21:04 CT:
+
+- Code now includes a guarded Cognito apply implementation behind `AUTH_PROVISIONING_APPLY_ENABLED=false` by default.
+- Apply requires exact caller ARN allowlist, explicit `planKey`, explicit `idempotencyKey`, optional domain/tenant allowlists, scoped social IdP secret refs, callback/logout URL ownership, per-operation DynamoDB state, and effective runtime activation state.
+- This is still NO-GO for real Zoosite Cognito creation until the real Zoosite auth secret refs exist in AWS, the apply allowlists are final, and a separate approved deploy enables `AUTH_PROVISIONING_APPLY_ENABLED=true`.
+
+Update at 2026-06-09 22:32 CT:
+
+- Apply now reconciles Cognito user pools by deterministic pool name plus Zoolanding ownership tags before creation.
+- Apply now reconciles public Cognito app clients by deterministic client name inside the reconciled user pool before creation.
+- Same-name user pools without matching `managedBy`, `domain`, `tenantId`, and `authProfileId` tags fail closed instead of being adopted.
+- Retry tests now cover DynamoDB `succeeded` state write failures after Cognito creates a user pool or app client; retry reuses the existing Cognito resource and does not duplicate it.
+- This remains NO-GO for real Zoosite Cognito creation until the final live secret refs, apply allowlists, approved deploy, and post-deploy smoke evidence exist.
+
 ## Step 3: API Proxy Deploy Plan
 
 Status: planned only, not executed.
@@ -67,6 +81,7 @@ Stop immediately if any of these occur:
 - CloudFormation does not finish in `UPDATE_COMPLETE`.
 - Unsigned provisioning access succeeds.
 - Executor `apply` returns anything other than fail-closed `501` / `manual-review-required`.
+- Executor `apply` is enabled without exact ARN, domain, tenant, current plan key, and current idempotency key controls.
 - Runtime responses leak secrets, raw secret refs, tokens, or client secrets.
 - Zoosite runtime auth returns `enabled: true` before activation is explicitly approved.
 - CORS reflects an attacker or unapproved origin.
@@ -87,7 +102,7 @@ Minimum HTTP smoke coverage:
 - Unsigned provisioning request is denied.
 - Signed IAM provisioning-plan request returns `200` with plan-only output.
 - Signed IAM executor `dry-run` returns `200` with preview-only output.
-- Signed IAM executor `apply` returns `501` with `manual-review-required`.
+- Signed IAM executor `apply` returns `501` while `AUTH_PROVISIONING_APPLY_ENABLED=false`.
 - CORS allows only approved origins and does not reflect an attacker origin.
 - Zoosite planned runtime remains `enabled: false`.
 - Runtime and provisioning responses contain no `clientSecret`, no social IdP secret values, and no browser-exposed secret references.
@@ -108,11 +123,11 @@ Do not run these smoke tests in this task because no deploy/AWS approval was gra
 
 ## Step 5: Real Cognito Apply Design
 
-Status: design only. Do not implement, deploy, or create resources from this section without a separate approved task.
+Status: partially implemented behind a disabled feature flag. Do not deploy with `AUTH_PROVISIONING_APPLY_ENABLED=true` or create real Cognito resources without a separate approved task that provides final allowlists and real server-side secret refs.
 
 ### Execution Boundary
 
-Real apply should use a separate executor Lambda and IAM role. It should not run inside the public proxy Lambda that serves browser/runtime reads.
+Real apply uses a separate executor Lambda and IAM role. It must not run inside the public proxy Lambda that serves browser/runtime reads.
 
 The apply role should have only the permissions required to:
 
@@ -130,12 +145,12 @@ Create a User Pool per draft/client/auth profile when strong isolation is requir
 
 Provision these resource families idempotently:
 
-- User Pool
-- Public App Client
-- User Pool Domain
-- Groups
-- Google, Facebook, and OIDC identity providers
-- App Client supported provider updates after IdPs exist
+- User Pool: list by deterministic name, verify Zoolanding ownership tags, fail closed on foreign same-name resources, create only when no owned match exists.
+- Public App Client: list by deterministic name within the reconciled pool, verify it is public, update settings, create only when no match exists.
+- User Pool Domain: describe by domain prefix before create and reject ownership conflicts.
+- Groups: list existing groups before creating missing groups.
+- Google, Facebook, and OIDC identity providers: describe provider before create/update.
+- App Client supported provider updates after IdPs exist.
 
 ### State, Idempotency, And Runtime Status
 
@@ -149,7 +164,7 @@ Keep desired config in the registry and effective state in a new `AuthProvisioni
 
 Runtime config must remain disabled except when effective state is `active`.
 
-Use an operation ledger keyed by `operationKey` and idempotency key. The executor key should include a hash of `planVersion`, `planKey`, `mode`, and the sanitized config hash. Apply must read, compare, create, update, and resume partial operations without duplicating resources.
+Use an operation ledger keyed by `operationKey` and idempotency key. The executor key includes a hash of `planVersion`, `planKey`, `mode`, and the sanitized config hash. Apply reads, compares, creates, updates, and resumes partial operations without duplicating resources. Failed operation records for the same idempotency key are retryable; succeeded operation records are terminal.
 
 ### Secrets
 
@@ -164,7 +179,8 @@ Initial real apply should require all of these gates:
 - `AUTH_PROVISIONING_APPLY_ENABLED=false` by default.
 - Explicit allowlists for IAM role ARNs, domains, and tenants.
 - Required `planKey`.
-- Required prior dry-run audit event for the same sanitized config hash.
+- Required executor `idempotencyKey`.
+- Required prior dry-run audit event for the same sanitized config hash before enabling apply in production.
 - Social IdP apply flag remains false until mappings and secret handling are verified.
 - Callback and logout URL allowlists validated before mutation.
 - Concurrency lock per domain/profile.
@@ -180,10 +196,10 @@ Version 1 should not delete Cognito resources. Rollback is logical:
 
 ### Tests Required Before Apply
 
-Before enabling apply, add tests for:
+Before enabling apply, keep or add tests for:
 
 - Botocore Stubber coverage for Cognito, SSM/Secrets Manager, KMS, DynamoDB, and S3 interactions.
-- Duplicate retry produces no duplicate resources.
+- Duplicate retry produces no duplicate resources. Covered locally with fake clients for user pool and public app client creation after DynamoDB `succeeded` state write failures.
 - State/config mismatches block mutation.
 - Partial operation resume.
 - Secret preflight failure performs no mutation.
@@ -196,13 +212,10 @@ Before enabling apply, add tests for:
 
 ### Known Gaps To Resolve First
 
-- Planned profiles currently require `clientId` or `audience`, but a real Cognito app client ID is generated during apply.
-- `planKey` should hash sanitized config, not only version/domain/profile/status.
-- Operation idempotency needs the sanitized config hash.
-- A state/audit table is missing.
-- A separate apply role and executor Lambda are missing.
-- `SecretNamePrefix` does not yet clearly match auth refs.
 - Hosted UI domain schema needs prefix/custom distinction.
 - ProviderDetails and AttributeMapping schema needs durable validation.
-- Callback/logout validation needs to be finalized before apply.
-- Removals must be explicitly non-destructive in v1.
+- Botocore Stubber coverage should be added for the real boto3 request/response contracts beyond the fake-client unit tests.
+- Live DynamoDB lock and retry behavior should be smoke-tested after an approved deploy with `AUTH_PROVISIONING_APPLY_ENABLED=false` first, then separately before enabling apply.
+- Real Zoosite social IdP secret refs must exist in AWS under the approved tenant/profile scope before real apply.
+- Final apply domain, tenant, and exact caller ARN allowlists must be approved before real apply.
+- Removals must remain explicitly non-destructive in v1.

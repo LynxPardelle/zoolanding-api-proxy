@@ -40,6 +40,22 @@ Parameters:
     Default: 'false'
     AllowedValues: ['false', 'true']
     Description: Guardrail flag for future real Cognito apply. Keep false until explicitly approved.
+  AuthProvisioningApplyAllowedDomains:
+    Type: String
+    Default: ''
+    Description: Comma-separated site domains allowed for real auth provisioning apply.
+  AuthProvisioningApplyAllowedTenants:
+    Type: String
+    Default: ''
+    Description: Comma-separated tenant IDs allowed for real auth provisioning apply.
+  AuthProvisioningSecretParameterPrefix:
+    Type: String
+    Default: zoolanding/auth/
+    Description: SSM Parameter Store hierarchy prefix for auth provisioning IdP credential references, without a leading slash for IAM ARNs.
+  AuthProvisioningSecretNamePrefix:
+    Type: String
+    Default: /zoolanding/auth/
+    Description: Secrets Manager name prefix for auth provisioning IdP credential references.
   LogLevel:
     Type: String
     Default: INFO
@@ -79,6 +95,8 @@ Resources:
             Ref: AuthProvisioningAllowedRoleNames
           AUTH_PROVISIONING_ALLOWED_ROLE_ARNS:
             Ref: AuthProvisioningAllowedRoleArns
+          AUTH_PROVISIONING_STATE_TABLE_NAME:
+            Ref: AuthProvisioningStateTableName
           LOG_LEVEL:
             Ref: LogLevel
       Policies:
@@ -99,6 +117,13 @@ Resources:
                 - ssm:GetParameter
               Resource:
                 Fn::Sub: arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SecretNamePrefix}*
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                Fn::GetAtt:
+                  - AuthProvisioningStateTable
+                  - Arn
       Events:
         ApiProxyRead:
           Type: Api
@@ -207,6 +232,10 @@ Resources:
             Ref: AuthProvisioningStateTableName
           AUTH_PROVISIONING_APPLY_ENABLED:
             Ref: AuthProvisioningApplyEnabled
+          AUTH_PROVISIONING_APPLY_ALLOWED_DOMAINS:
+            Ref: AuthProvisioningApplyAllowedDomains
+          AUTH_PROVISIONING_APPLY_ALLOWED_TENANTS:
+            Ref: AuthProvisioningApplyAllowedTenants
           LOG_LEVEL:
             Ref: LogLevel
       Policies:
@@ -226,12 +255,42 @@ Resources:
               Action:
                 - dynamodb:GetItem
                 - dynamodb:PutItem
-                - dynamodb:UpdateItem
-                - dynamodb:Query
               Resource:
                 Fn::GetAtt:
                   - AuthProvisioningStateTable
                   - Arn
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+              Resource:
+                Fn::Sub: arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AuthProvisioningSecretParameterPrefix}*
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                Fn::Sub: arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AuthProvisioningSecretNamePrefix}*
+            - Effect: Allow
+              Action:
+                - cognito-idp:CreateUserPool
+                - cognito-idp:DescribeUserPoolDomain
+                - cognito-idp:ListUserPools
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - cognito-idp:CreateGroup
+                - cognito-idp:CreateIdentityProvider
+                - cognito-idp:CreateUserPoolClient
+                - cognito-idp:CreateUserPoolDomain
+                - cognito-idp:DescribeIdentityProvider
+                - cognito-idp:DescribeUserPool
+                - cognito-idp:DescribeUserPoolClient
+                - cognito-idp:ListGroups
+                - cognito-idp:ListTagsForResource
+                - cognito-idp:ListUserPoolClients
+                - cognito-idp:UpdateIdentityProvider
+                - cognito-idp:UpdateUserPoolClient
+              Resource:
+                Fn::Sub: arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
       Events:
         AuthProvisioningExecutorPost:
           Type: Api
@@ -264,6 +323,8 @@ Resources:
             Ref: ConfigPayloadsBucketName
           AUTH_REGISTRY_FILE_NAME:
             Ref: AuthRegistryFileName
+          AUTH_PROVISIONING_STATE_TABLE_NAME:
+            Ref: AuthProvisioningStateTableName
           LOG_LEVEL:
             Ref: LogLevel
       Policies:
@@ -279,6 +340,13 @@ Resources:
                 - s3:GetObject
               Resource:
                 Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/*
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                Fn::GetAtt:
+                  - AuthProvisioningStateTable
+                  - Arn
 
 Outputs:
   ApiUrl:

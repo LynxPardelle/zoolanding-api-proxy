@@ -8,15 +8,15 @@ The Angular app calls:
 - `POST /api-proxy/action` for configured mutable API actions.
 - `GET` or `POST /auth/runtime-config` for public, config-driven auth metadata.
 - `POST /auth/provisioning-plan` for server-only, plan-only Cognito provisioning output.
-- `POST /auth/provisioning-executor` for server-only Cognito executor preview.
+- `POST /auth/provisioning-executor` for server-only Cognito executor dry-run and guarded apply.
 
 The browser sends only `domain`, optional `pageId`, `sourceId` or `actionId`, and allowlisted input values. It never sends upstream URLs or credentials. The Lambda resolves the published server-only policy from `server/integrations.json`, loads credentials by `credentialRef` from SSM SecureString, calls the upstream API, filters the response, and returns safe JSON.
 
 Auth profiles are resolved from the published server-only file `server/auth-profile-registry.json`. The runtime auth endpoint accepts only `domain` and `authProfileId`, enforces that the browser `Origin` belongs to the requested domain or to a managed alias for that domain, then returns the same public `runtime.auth` shape validated by the Angular app. Active profiles return `enabled: true`; planned, provisioning, suspended, and failed profiles return the same secret-free public metadata with `enabled: false`. The provisioning endpoint is denied by default, accepts only `domain` and `authProfileId`, and returns only a server-only, plan-only contract when the caller's signed IAM role is explicitly allowlisted by `AUTH_PROVISIONING_ALLOWED_ROLE_NAMES` or `AUTH_PROVISIONING_ALLOWED_ROLE_ARNS`.
 
-Provisioning plans are deterministic and versioned. The response includes a stable `planVersion`, `planKey`, sanitized `configHash`, lifecycle status, runtime public-client shape, hosted UI data, expected post-activation outputs, normalized social IdP references, and per-operation `operationKey` plus `idempotencyKey` values for a future executor. `planKey` and operation idempotency are bound to the sanitized desired config, so callback URLs, logout URLs, groups, hosted UI config, scopes, and social provider reference changes produce a new plan. `planned` and `provisioning` return resumable operations; `active` returns an explicit noop plan; `suspended` and `failed` return explicit manual-review plans. No raw social credentials, secret values, tokens, or browser-supplied policy fields are accepted or returned.
+Provisioning plans are deterministic and versioned. The response includes a stable `planVersion`, `planKey`, sanitized `configHash`, lifecycle status, runtime public-client shape, hosted UI data, expected post-activation outputs, normalized social IdP references, and per-operation `operationKey` plus `idempotencyKey` values for the executor. `planKey` and operation idempotency are bound to the sanitized desired config, so callback URLs, logout URLs, groups, hosted UI config, scopes, and social provider reference changes produce a new plan. `planned` and `provisioning` return resumable operations; `active` returns an explicit noop plan; `suspended` and `failed` return explicit manual-review plans. No raw social credentials, secret values, tokens, or browser-supplied policy fields are accepted or returned.
 
-The executor endpoint is scaffold-only and server-only, and is deployed on a separate Lambda boundary from the public proxy/runtime handler. It accepts only `domain`, `authProfileId`, `mode`, optional `planKey`, and optional `idempotencyKey`. `mode: "dry-run"` regenerates the current plan, validates the optional plan key, and returns a sanitized deterministic preview plus audit event without social secret refs or tenant secret material. `mode: "apply"` fails closed with `501` and `manual-review-required`; it does not create, update, or delete Cognito resources.
+The executor endpoint is server-only and deployed on a separate Lambda boundary from the public proxy/runtime handler. It accepts only `domain`, `authProfileId`, `mode`, optional `planKey`, and optional `idempotencyKey`. `mode: "dry-run"` regenerates the current plan, validates the optional plan key, and returns a sanitized deterministic preview plus audit event without social secret refs or tenant secret material. `mode: "apply"` is implemented but disabled by default through `AUTH_PROVISIONING_APPLY_ENABLED=false`; when enabled it requires an exact caller ARN allowlist, explicit `planKey`, explicit `idempotencyKey`, optional domain/tenant allowlists, scoped social IdP secret refs, callback/logout URL ownership, and the DynamoDB state table. Apply reconciles Cognito user pools by deterministic name plus Zoolanding ownership tags and public app clients by deterministic name inside that pool before creating resources. It uses non-destructive create/update Cognito operations and persists effective runtime state; it does not delete Cognito resources.
 
 Parameterized read sources can use server-owned `urlTemplate` values, for example `https://pokeapi.co/api/v2/pokemon/{pokemonName}`. Template placeholders must also appear in `allowedInputFields`; the Lambda trims and percent-encodes those values, uses them only to resolve the upstream URL, and keeps all undeclared fields blocked.
 
@@ -25,10 +25,10 @@ Server-only `server/integrations.json` entries can protect individual sources/ac
 ## AWS Dependencies
 
 - DynamoDB table: `zoolanding-config-registry`
-- DynamoDB table: `zoolanding-auth-provisioning-state` for future provisioning state and sanitized audit records
+- DynamoDB table: `zoolanding-auth-provisioning-state` for provisioning operation state and effective runtime activation state
 - S3 bucket: `zoolanding-config-payloads`
 - SSM Parameter Store SecureString for `credentialRef` values
-- API Gateway: `POST /api-proxy/read`, `POST /api-proxy/action`, `GET|POST /auth/runtime-config`, `POST /auth/provisioning-plan`, and `POST /auth/provisioning-executor`. The executor route is declared for future server-only preview and must remain IAM-authorized before any deployment.
+- API Gateway: `POST /api-proxy/read`, `POST /api-proxy/action`, `GET|POST /auth/runtime-config`, `POST /auth/provisioning-plan`, and `POST /auth/provisioning-executor`. The executor route must remain IAM-authorized.
 - PyJWT with crypto support for reusable JWT authorizer verification against JWKS
 
 ## Local Tests
@@ -88,8 +88,9 @@ The legacy script creates only missing Secrets Manager entries under `zoolanding
 - Auth profile registries must not contain raw secrets, tokens, client secrets, private keys, passwords, credentials, or API keys. Social IdP credentials are represented by SSM/Secrets Manager secret refs only.
 - Public auth runtime config never includes social IdP secret refs or raw credentials.
 - Provisioning plan requests accept only `domain` and `authProfileId`; secret-looking or policy-style browser/server payload fields are rejected instead of ignored.
-- Provisioning plans are server-only and plan-only; this repo does not create Cognito, Google, Facebook, DynamoDB, S3, API Gateway, or IAM resources unless a future deploy is explicitly run.
-- Provisioning executor requests accept only `domain`, `authProfileId`, `mode`, `planKey`, and `idempotencyKey`; `dry-run` is preview-only and `apply` is not implemented. Real Cognito apply must stay behind the separate executor Lambda, state/audit table, feature flag, IAM allowlists, and future Cognito-specific tests.
+- Provisioning plans are server-only and plan-only; dry-run does not create Cognito, Google, Facebook, DynamoDB, S3, API Gateway, or IAM resources.
+- Provisioning executor requests accept only `domain`, `authProfileId`, `mode`, `planKey`, and `idempotencyKey`; `dry-run` is preview-only and `apply` remains disabled unless `AUTH_PROVISIONING_APPLY_ENABLED=true` is deployed with exact ARN, domain, and tenant guardrails.
+- Apply resolves social IdP credentials only from scoped `/zoolanding/auth/{tenantId}/...` SSM/Secrets Manager references, rejects placeholders, performs preflight before mutation, and never returns raw secret refs or secret values.
 - JWT authorization verifies RS256 tokens through JWKS, validates issuer, accepts either `aud` or Cognito access-token `client_id`, and then enforces tenant/group policy from the server-only profile.
 - Protected integrations use server-only `access.required`, `access.authProfileId`, and optional `access.allowedGroups`; invalid or missing user JWTs return a generic `Unauthorized` response before any upstream call.
 - Server-only integrations may configure safe static request headers through `headers`. Static `authorization`, `cookie`, `set-cookie`, and `x-api-key` headers are rejected so credentials keep flowing through `auth` and managed credential storage.
