@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import re
+import hashlib
 import urllib.parse
 from typing import Any, Dict, Optional
 
@@ -37,10 +38,13 @@ AUTH_PROVISIONING_ALLOWED_ROLE_ARNS = os.getenv("AUTH_PROVISIONING_ALLOWED_ROLE_
 _AUTH_REQUEST_ORIGIN = None
 
 AUTH_PATHS = {"/auth/runtime-config", "/auth/provisioning-plan"}
+AUTH_PROFILE_STATUSES = {"active", "planned", "provisioning", "suspended", "failed"}
+AUTH_PROVISIONING_PLAN_SCHEMA_VERSION = "2026-06-09.v1"
 TEST_PREVIEW_ORIGIN_HOST = "test.zoolandingpage.com.mx"
 CONTROL_OR_WHITESPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 RAW_SECRET_KEY_RE = re.compile(r"(secret|token|password|private[_-]?key|credential|api[_-]?key)", re.I)
 RUNTIME_CONFIG_ALLOWED_KEYS = {"domain", "authProfileId"}
+PROVISIONING_PLAN_ALLOWED_KEYS = {"domain", "authProfileId"}
 ALIAS_TARGET_KEYS = (
     "domain",
     "canonicalDomain",
@@ -57,6 +61,16 @@ ALLOWED_SECRET_REFERENCE_KEYS = {
     "secretRefs",
     "socialIdpSecretRefs",
     "providerSecretRefs",
+    "providerSecretRef",
+    "clientIdRef",
+    "clientSecretRef",
+    "clientIdRefs",
+    "clientSecretRefs",
+}
+SAFE_PUBLIC_AUTH_METADATA_KEYS = {
+    "tokenUrl",
+    "tokenEndpoint",
+    "tokenEndpointUrl",
 }
 
 
@@ -177,8 +191,9 @@ def validate_auth_registry(registry: Dict[str, Any]) -> None:
         seen.add(profile_id)
 
         status = _profile_status(profile)
-        if status not in {"active", "planned", "provisioning", "suspended", "failed"}:
+        if status not in AUTH_PROFILE_STATUSES:
             raise AuthRegistryError("Auth profile status is invalid")
+        _validate_social_identity_provider_metadata(profile)
         if status == "active":
             if not str(profile.get("tenantId") or "").strip():
                 raise AuthRegistryError("Active auth profile requires tenantId")
@@ -387,6 +402,7 @@ def _alias_metadata_targets_domain(metadata: Optional[Dict[str, Any]], requested
 def _provisioning_plan_response(event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     if not _is_trusted_server_request(event):
         raise AuthUnauthorizedError()
+    _reject_unsupported_provisioning_options(payload)
 
     domain = normalize_domain(payload.get("domain"))
     registry = load_auth_registry_for_domain(domain)
@@ -483,22 +499,67 @@ def _dry_run_enabled() -> bool:
 
 
 def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+    _validate_provisioning_profile(profile)
+    normalized_domain = normalize_domain(domain)
+    auth_profile_id = _profile_id(profile)
+    status = _profile_status(profile)
     issuer = str(profile.get("issuer") or "").strip()
+    lifecycle = _plan_lifecycle(status)
+    public_runtime_auth = _public_runtime_auth(profile, enabled=status == "active")
+    social_identity_providers = _social_identity_providers(profile)
+    operations = _provisioning_operations(
+        domain=normalized_domain,
+        auth_profile_id=auth_profile_id,
+        tenant_id=str(profile.get("tenantId") or "").strip(),
+        status=status,
+        social_identity_providers=social_identity_providers,
+    )
+    plan_key = _stable_key("plan", AUTH_PROVISIONING_PLAN_SCHEMA_VERSION, normalized_domain, auth_profile_id, status)
     return {
         "mode": "plan-only",
+        "planVersion": AUTH_PROVISIONING_PLAN_SCHEMA_VERSION,
+        "planKey": plan_key,
         "provider": "cognito",
-        "domain": normalize_domain(domain),
-        "profileId": _profile_id(profile),
+        "domain": normalized_domain,
+        "authProfileId": auth_profile_id,
         "tenantId": str(profile.get("tenantId") or "").strip(),
-        "status": _profile_status(profile),
-        "issuer": issuer,
-        "jwksUrl": str(profile.get("jwksUrl") or _jwks_url(issuer)) if issuer else "",
-        "hostedUiDomain": str(profile.get("hostedUiDomain") or "").strip(),
-        "audiences": _audiences(profile),
-        "callbackUrls": _string_list(profile.get("callbackUrls")),
-        "logoutUrls": _string_list(profile.get("logoutUrls")),
-        "allowedGroups": _string_list(profile.get("allowedGroups")),
-        "socialIdpSecretRefs": profile.get("socialIdpSecretRefs") if isinstance(profile.get("socialIdpSecretRefs"), dict) else {},
+        "status": status,
+        "trustedCallerRequired": True,
+        "lifecycle": lifecycle,
+        "runtimeAuth": {
+            "enabledWhenStatus": "active",
+            "currentEnabled": status == "active",
+            "publicClient": {
+                "clientId": public_runtime_auth["clientId"],
+                "audiences": _audiences(profile),
+                "scopes": public_runtime_auth["scopes"],
+                "callbackUrls": _string_list(profile.get("callbackUrls")),
+                "logoutUrls": _string_list(profile.get("logoutUrls")),
+                "redirectPath": public_runtime_auth["redirectPath"],
+                "logoutPath": public_runtime_auth["logoutPath"],
+                "loginPath": public_runtime_auth["loginPath"],
+                "allowedGroups": public_runtime_auth["allowedGroups"],
+            },
+        },
+        "hostedUi": _hosted_ui_details(profile),
+        "groups": {
+            "claim": str(profile.get("groupClaim") or "cognito:groups"),
+            "allowed": _string_list(profile.get("allowedGroups")),
+        },
+        "socialIdentityProviders": social_identity_providers,
+        "operations": operations,
+        "expectedOutputs": {
+            "status": "active",
+            "issuer": issuer,
+            "jwksUrl": str(profile.get("jwksUrl") or _jwks_url(issuer)) if issuer else "",
+            "hostedUiDomain": str(profile.get("hostedUiDomain") or "").strip(),
+            "userPoolId": str(profile.get("userPoolId") or "").strip(),
+            "publicClientId": public_runtime_auth["clientId"],
+            "audiences": _audiences(profile),
+            "callbackUrls": _string_list(profile.get("callbackUrls")),
+            "logoutUrls": _string_list(profile.get("logoutUrls")),
+            "runtimeAuthEnabled": True,
+        },
         "jwtAuthorizer": {
             "audienceMode": "aud-or-client_id",
             "tenantClaim": str(profile.get("tenantClaim") or "custom:tenant_id"),
@@ -581,6 +642,11 @@ def _reject_unsupported_runtime_options(payload: Dict[str, Any]) -> None:
         raise AuthServiceError("Unsupported auth runtime option")
 
 
+def _reject_unsupported_provisioning_options(payload: Dict[str, Any]) -> None:
+    if not all(str(key) in PROVISIONING_PLAN_ALLOWED_KEYS for key in payload.keys()):
+        raise AuthServiceError("Unsupported auth provisioning option")
+
+
 def _is_trusted_server_request(event: Dict[str, Any]) -> bool:
     caller_arn = _caller_arn(event)
     if not caller_arn:
@@ -633,6 +699,9 @@ def _reject_raw_secret_material(value: Any, path: str = "") -> None:
             normalized_key = str(key)
             if normalized_key in ALLOWED_SECRET_REFERENCE_KEYS:
                 _validate_secret_ref_value(child, normalized_key)
+                continue
+            if normalized_key in SAFE_PUBLIC_AUTH_METADATA_KEYS:
+                _reject_raw_secret_material(child, f"{path}.{normalized_key}" if path else normalized_key)
                 continue
             if normalized_key not in ALLOWED_SECRET_REFERENCE_KEYS and RAW_SECRET_KEY_RE.search(normalized_key):
                 raise AuthRegistryError("Auth registry must not contain raw secrets")
@@ -712,6 +781,293 @@ def _validate_same_origin_path(value: str, label: str) -> None:
 
 def _jwks_url(issuer: str) -> str:
     return f"{str(issuer or '').rstrip('/')}/.well-known/jwks.json"
+
+
+def _validate_provisioning_profile(profile: Dict[str, Any]) -> None:
+    status = _profile_status(profile)
+    if status not in AUTH_PROFILE_STATUSES:
+        raise AuthRegistryError("Auth profile status is invalid")
+    if not str(profile.get("tenantId") or "").strip():
+        raise AuthRegistryError("Provisioning plan requires tenantId")
+
+    issuer = str(profile.get("issuer") or "").strip()
+    if issuer:
+        _validate_https_url(issuer, "issuer")
+
+    hosted_ui_domain = str(profile.get("hostedUiDomain") or "").strip()
+    if hosted_ui_domain:
+        _validate_https_url(hosted_ui_domain, "hostedUiDomain")
+
+    _runtime_path_from_profile(profile, "redirectPath", "callbackUrls", "redirectPath")
+    _runtime_path_from_profile(profile, "logoutPath", "logoutUrls", "logoutPath")
+    _validate_same_origin_path(str(profile.get("loginPath") or "/login"), "loginPath")
+    if not _audiences(profile):
+        raise AuthRegistryError("Provisioning plan requires an audience/clientId")
+    for callback_url in _string_list(profile.get("callbackUrls")):
+        _validate_https_url(callback_url, "callbackUrl")
+    for logout_url in _string_list(profile.get("logoutUrls")):
+        _validate_https_url(logout_url, "logoutUrl")
+    for optional_path in ("postLoginPath", "postLogoutPath"):
+        if profile.get(optional_path):
+            _validate_same_origin_path(str(profile.get(optional_path)), optional_path)
+
+    _validate_social_identity_provider_metadata(profile)
+
+
+def _plan_lifecycle(status: str) -> Dict[str, Any]:
+    if status == "planned":
+        return {
+            "currentStatus": status,
+            "runtimeAuthEnabled": False,
+            "executorAction": "prepare-provisioning",
+            "expectedNextStatus": "provisioning",
+            "expectedFinalStatus": "active",
+        }
+    if status == "provisioning":
+        return {
+            "currentStatus": status,
+            "runtimeAuthEnabled": False,
+            "executorAction": "resume-provisioning",
+            "expectedNextStatus": "provisioning",
+            "expectedFinalStatus": "active",
+        }
+    if status == "active":
+        return {
+            "currentStatus": status,
+            "runtimeAuthEnabled": True,
+            "executorAction": "noop-already-active",
+            "expectedNextStatus": "active",
+            "expectedFinalStatus": "active",
+        }
+    return {
+        "currentStatus": status,
+        "runtimeAuthEnabled": False,
+        "executorAction": "manual-review",
+        "expectedNextStatus": status,
+        "expectedFinalStatus": status,
+    }
+
+
+def _hosted_ui_details(profile: Dict[str, Any]) -> Dict[str, Any]:
+    hosted_ui_domain = str(profile.get("hostedUiDomain") or "").strip()
+    parsed = urllib.parse.urlparse(hosted_ui_domain)
+    return {
+        "domainUrl": hosted_ui_domain,
+        "domainHost": parsed.netloc,
+        "loginPath": str(profile.get("loginPath") or "/login").strip(),
+        "redirectPath": _runtime_path_from_profile(profile, "redirectPath", "callbackUrls", "redirectPath"),
+        "logoutPath": _runtime_path_from_profile(profile, "logoutPath", "logoutUrls", "logoutPath"),
+    }
+
+
+def _social_identity_providers(profile: Dict[str, Any]) -> list[Dict[str, Any]]:
+    providers = profile.get("socialIdentityProviders")
+    if isinstance(providers, list):
+        normalized: list[Dict[str, Any]] = []
+        for provider in providers:
+            if isinstance(provider, dict):
+                normalized.append(_normalize_social_identity_provider(provider))
+        normalized.sort(key=lambda item: item["providerId"])
+        return normalized
+
+    legacy_refs = profile.get("socialIdpSecretRefs")
+    if isinstance(legacy_refs, dict):
+        normalized = []
+        for provider_id in sorted(legacy_refs.keys()):
+            normalized.append({
+                "providerId": str(provider_id).strip().lower(),
+                "providerType": str(provider_id).strip().lower(),
+                "enabled": True,
+                "secretRefs": {
+                    "provider": str(legacy_refs[provider_id]).strip(),
+                },
+            })
+        return normalized
+
+    return []
+
+
+def _normalize_social_identity_provider(provider: Dict[str, Any]) -> Dict[str, Any]:
+    provider_id = str(
+        provider.get("providerId")
+        or provider.get("provider")
+        or provider.get("name")
+        or provider.get("id")
+        or provider.get("type")
+        or ""
+    ).strip().lower()
+    if not provider_id:
+        raise AuthRegistryError("Social identity provider requires providerId")
+
+    provider_type = str(provider.get("providerType") or provider.get("type") or provider_id).strip().lower()
+    normalized: Dict[str, Any] = {
+        "providerId": provider_id,
+        "providerType": provider_type,
+        "enabled": bool(provider.get("enabled", True)),
+    }
+
+    display_name = str(provider.get("displayName") or "").strip()
+    if display_name:
+        normalized["displayName"] = display_name
+
+    scopes = _string_list(provider.get("scopes"))
+    if scopes:
+        normalized["scopes"] = scopes
+
+    for key in ("issuer", "discoveryUrl", "authorizeUrl", "tokenUrl", "userInfoUrl", "jwksUrl", "attributeRequestMethod"):
+        value = provider.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized[key] = value.strip()
+
+    secret_refs: Dict[str, Any] = {}
+    if isinstance(provider.get("secretRefs"), dict):
+        for ref_key, ref_value in provider["secretRefs"].items():
+            secret_refs[str(ref_key)] = ref_value
+    for source_key, target_key in (
+        ("secretRef", "provider"),
+        ("providerSecretRef", "provider"),
+        ("clientIdRef", "clientId"),
+        ("clientSecretRef", "clientSecret"),
+    ):
+        value = provider.get(source_key)
+        if isinstance(value, str) and value.strip():
+            secret_refs[target_key] = value.strip()
+    if secret_refs:
+        _validate_secret_ref_value(secret_refs, "socialIdentityProviders.secretRefs")
+        normalized["secretRefs"] = secret_refs
+
+    return normalized
+
+
+def _validate_social_identity_provider_metadata(profile: Dict[str, Any]) -> None:
+    for provider in _social_identity_providers(profile):
+        for url_key in ("issuer", "discoveryUrl", "authorizeUrl", "tokenUrl", "userInfoUrl", "jwksUrl"):
+            if provider.get(url_key):
+                _validate_https_url(str(provider.get(url_key)), url_key)
+
+
+def _provisioning_operations(
+    *,
+    domain: str,
+    auth_profile_id: str,
+    tenant_id: str,
+    status: str,
+    social_identity_providers: list[Dict[str, Any]],
+) -> list[Dict[str, Any]]:
+    if status == "active":
+        return []
+    if status in {"suspended", "failed"}:
+        return []
+
+    operations = [
+        _plan_operation(
+            domain=domain,
+            auth_profile_id=auth_profile_id,
+            tenant_id=tenant_id,
+            status=status,
+            operation_id="ensure-user-pool",
+            stage="identity-core",
+            expected_status_after_completion="provisioning",
+        ),
+        _plan_operation(
+            domain=domain,
+            auth_profile_id=auth_profile_id,
+            tenant_id=tenant_id,
+            status=status,
+            operation_id="ensure-hosted-ui-domain",
+            stage="hosted-ui",
+            expected_status_after_completion="provisioning",
+            depends_on=["ensure-user-pool"],
+        ),
+        _plan_operation(
+            domain=domain,
+            auth_profile_id=auth_profile_id,
+            tenant_id=tenant_id,
+            status=status,
+            operation_id="ensure-public-client",
+            stage="public-client",
+            expected_status_after_completion="provisioning",
+            depends_on=["ensure-user-pool"],
+        ),
+        _plan_operation(
+            domain=domain,
+            auth_profile_id=auth_profile_id,
+            tenant_id=tenant_id,
+            status=status,
+            operation_id="ensure-user-groups",
+            stage="groups",
+            expected_status_after_completion="provisioning",
+            depends_on=["ensure-public-client"],
+        ),
+    ]
+    if social_identity_providers:
+        operations.append(
+            _plan_operation(
+                domain=domain,
+                auth_profile_id=auth_profile_id,
+                tenant_id=tenant_id,
+                status=status,
+                operation_id="ensure-social-identity-providers",
+                stage="social-idps",
+                expected_status_after_completion="provisioning",
+                depends_on=["ensure-public-client"],
+            )
+        )
+    operations.append(
+        _plan_operation(
+            domain=domain,
+            auth_profile_id=auth_profile_id,
+            tenant_id=tenant_id,
+            status=status,
+            operation_id="finalize-runtime-activation",
+            stage="finalize",
+            expected_status_after_completion="active",
+            depends_on=[operation["operationId"] for operation in operations],
+        )
+    )
+    return operations
+
+
+def _plan_operation(
+    *,
+    domain: str,
+    auth_profile_id: str,
+    tenant_id: str,
+    status: str,
+    operation_id: str,
+    stage: str,
+    expected_status_after_completion: str,
+    depends_on: Optional[list[str]] = None,
+) -> Dict[str, Any]:
+    operation_key = ":".join(("cognito", domain, auth_profile_id, operation_id))
+    operation = {
+        "operationId": operation_id,
+        "operationKey": operation_key,
+        "idempotencyKey": _stable_key(
+            "op",
+            AUTH_PROVISIONING_PLAN_SCHEMA_VERSION,
+            domain,
+            auth_profile_id,
+            tenant_id,
+            status,
+            operation_id,
+        ),
+        "stage": stage,
+        "expectedStatusAfterCompletion": expected_status_after_completion,
+        "target": {
+            "domain": domain,
+            "authProfileId": auth_profile_id,
+            "tenantId": tenant_id,
+        },
+    }
+    if depends_on:
+        operation["dependsOn"] = depends_on
+    return operation
+
+
+def _stable_key(*parts: str) -> str:
+    raw = "|".join(str(part or "").strip() for part in parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _request_payload(event: Dict[str, Any]) -> Dict[str, Any]:

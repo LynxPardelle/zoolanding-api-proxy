@@ -76,6 +76,8 @@ Inactive profiles return the same public shape with `enabled: false`; profile st
 
 `/auth/provisioning-plan` is server-only. It is denied unless the API Gateway/Lambda request context contains a signed IAM role ARN whose role name or ARN is allowlisted by environment configuration.
 
+Provisioning-plan requests accept only `domain` and `authProfileId`. The response is versioned and deterministic so a future executor can resume safely without inventing new identifiers: it includes `planVersion`, `planKey`, lifecycle state, runtime public-client config, hosted UI details, expected post-activation outputs, normalized social IdP references, and per-operation `operationKey` plus `idempotencyKey` values. `planned` and `provisioning` return resumable operations toward `active`; `active` returns an explicit noop plan; `suspended` and `failed` return explicit manual-review plans. Social IdPs stay reference-only; no secret values are resolved or echoed.
+
 ## Server-Only Policy
 
 Published drafts can include `server/integrations.json` in the config payload bucket. Runtime-read must not expose this file to the browser.
@@ -209,6 +211,8 @@ Published drafts can include `server/auth-profile-registry.json` in the same pri
 
 Raw secrets, tokens, client secrets, private keys, passwords, credentials, and API keys are rejected in the registry. Social IdP setup uses secret refs only, and those refs must look like SSM/Secrets Manager references such as `/zoolanding/auth/tenant-a/staff/google` or AWS SSM/Secrets Manager ARNs. Active profiles must include `tenantId`, use absolute HTTPS `issuer` and `hostedUiDomain` values, same-origin auth paths that start with `/`, and HTTPS callback/logout URLs.
 
+Structured social IdPs may also use a server-only `socialIdentityProviders` list. Each entry may declare `providerId`, `providerType` (`google`, `facebook`, `oidc`, or another executor-known type), optional public OIDC metadata such as `issuer`, `discoveryUrl`, `authorizeUrl`, `tokenUrl`, `userInfoUrl`, and `jwksUrl`, plus secret references such as `clientIdRef`, `clientSecretRef`, `providerSecretRef`, or nested `secretRefs`. Secret-looking raw values are still rejected.
+
 The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for future protected APIs. It verifies RS256 tokens through JWKS, keeps the full Cognito issuer path when building `/.well-known/jwks.json`, accepts either `aud` or Cognito access-token `client_id`, and enforces tenant/group policy from the server-only profile.
 
 ## Acceptance Criteria
@@ -217,7 +221,7 @@ The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for futur
 - A single draft/site can optionally configure one or more auth profiles.
 - Public auth runtime config exposes only safe public metadata and never exposes client secrets or social IdP secret refs.
 - Public auth runtime config rejects browser origins that do not belong to the requested domain or a proven managed alias for that domain.
-- Server-only provisioning plans are denied by default and remain plan-only until a future explicit deployment/provisioning decision.
+- Server-only provisioning plans are denied by default, remain plan-only until a future explicit deployment/provisioning decision, and expose stable operation/idempotency keys for a future executor.
 - The reusable JWT authorizer can protect future blogs, dashboards, uploads, and mutable actions using the same server-only registry policy.
 - The browser cannot choose arbitrary upstream URLs.
 - The browser cannot send undeclared input fields.
