@@ -156,6 +156,22 @@ Resources:
               Ref: ApiProxyApi
             Path: /auth/provisioning-plan
             Method: OPTIONS
+        AuthProvisioningExecutorPost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/provisioning-executor
+            Method: POST
+            Auth:
+              Authorizer: AWS_IAM
+        AuthProvisioningExecutorOptions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/provisioning-executor
+            Method: OPTIONS
 
   AuthJwtAuthorizerFunction:
     Type: AWS::Serverless::Function
@@ -208,6 +224,10 @@ Outputs:
     Description: Server-only plan-only auth provisioning endpoint URL.
     Value:
       Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/auth/provisioning-plan
+  AuthProvisioningExecutorEndpoint:
+    Description: Server-only dry-run Cognito provisioning executor endpoint URL.
+    Value:
+      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/auth/provisioning-executor
   FunctionName:
     Description: Deployed Lambda function name.
     Value:

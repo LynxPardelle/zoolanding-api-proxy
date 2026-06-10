@@ -345,6 +345,18 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
             ),
         )
 
+    def test_provisioning_executor_post_route_requires_aws_iam_authorizer(self):
+        with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
+            template = template_file.read()
+
+        self.assertRegex(
+            template,
+            re.compile(
+                r"AuthProvisioningExecutorPost:.*?Method:\s*POST.*?Auth:\s*Authorizer:\s*AWS_IAM",
+                re.S,
+            ),
+        )
+
 
 class TestAuthServiceProvisioningPlan(unittest.TestCase):
     def test_provisioning_plan_is_denied_by_default(self):
@@ -498,6 +510,171 @@ class TestAuthServiceProvisioningPlan(unittest.TestCase):
             self.assertFalse(body["plan"]["runtimeAuth"]["currentEnabled"])
             self.assertEqual(body["plan"]["lifecycle"]["executorAction"], "manual-review")
             self.assertEqual(body["plan"]["operations"], [])
+
+
+class TestAuthServiceProvisioningExecutor(unittest.TestCase):
+    trusted_context = {
+        "identity": {
+            "userArn": "arn:aws:sts::123456789012:assumed-role/zoolanding-auth-planner/session"
+        }
+    }
+
+    def trusted_event(self, body):
+        return api_event(
+            "/auth/provisioning-executor",
+            body,
+            request_context=self.trusted_context,
+        )
+
+    def test_executor_dry_run_returns_sanitized_preview_without_aws_calls(self):
+        event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "dry-run",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()) as load_registry, \
+                patch.object(auth, "load_item") as load_item, \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        serialized = json.dumps(body, sort_keys=True)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["executor"]["mode"], "dry-run")
+        self.assertEqual(body["executor"]["executionStatus"], "preview-only")
+        self.assertEqual(body["executor"]["target"]["domain"], "example.test")
+        self.assertEqual(body["executor"]["target"]["authProfileId"], "planned")
+        self.assertGreater(len(body["executor"]["operations"]), 0)
+        self.assertEqual(body["executor"]["operations"][0]["operationId"], "ensure-user-pool")
+        self.assertNotIn("secretRefs", serialized)
+        self.assertNotIn("clientSecret", serialized)
+        self.assertNotIn("/zoolanding/auth", serialized)
+        load_registry.assert_called_once_with("example.test")
+        load_item.assert_not_called()
+
+    def test_executor_apply_fails_closed_by_default_without_aws_calls(self):
+        event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "apply",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.object(auth, "load_item") as load_item, \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        self.assertEqual(response["statusCode"], 501)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["executor"]["mode"], "apply")
+        self.assertEqual(body["executor"]["executionStatus"], "manual-review-required")
+        self.assertEqual(body["error"], "Cognito executor apply is not implemented")
+        self.assertEqual(body["executor"]["operations"], [])
+        load_item.assert_not_called()
+
+    def test_executor_rejects_extra_fields_and_browser_secret_material(self):
+        for field_name in ("clientSecret", "adminOverride"):
+            event = self.trusted_event({
+                "domain": "example.test",
+                "authProfileId": "planned",
+                "mode": "dry-run",
+                field_name: "must-not-pass",
+            })
+
+            with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()) as load_registry, \
+                    patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+                response = auth.auth_lambda_handler(event, Ctx())
+
+            self.assertEqual(response["statusCode"], 400)
+            self.assertEqual(payload(response)["error"], "Unsupported auth provisioning executor option")
+            self.assertNotIn("must-not-pass", response["body"])
+            load_registry.assert_not_called()
+
+    def test_executor_keys_are_deterministic_and_do_not_include_sensitive_material(self):
+        event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "dry-run",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+            repeated_response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        repeated_body = payload(repeated_response)
+        serialized = json.dumps(body, sort_keys=True)
+        self.assertEqual(body["executor"]["planKey"], repeated_body["executor"]["planKey"])
+        self.assertEqual(body["executor"]["idempotencyKey"], repeated_body["executor"]["idempotencyKey"])
+        self.assertEqual(body["executor"]["auditEvent"]["auditKey"], repeated_body["executor"]["auditEvent"]["auditKey"])
+        self.assertRegex(body["executor"]["idempotencyKey"], r"^[0-9a-f]{64}$")
+        self.assertRegex(body["executor"]["auditEvent"]["auditKey"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("tenant-a", body["executor"]["idempotencyKey"])
+        self.assertNotIn("secret", serialized.lower())
+
+    def test_executor_accepts_expected_idempotency_key_for_current_plan(self):
+        initial_event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "dry-run",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            initial_response = auth.auth_lambda_handler(initial_event, Ctx())
+
+        expected_key = payload(initial_response)["executor"]["idempotencyKey"]
+        event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "dry-run",
+            "idempotencyKey": expected_key,
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["executor"]["idempotencyKey"], expected_key)
+
+    def test_executor_rejects_valid_hex_idempotency_key_that_does_not_match_current_plan(self):
+        event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "dry-run",
+            "idempotencyKey": "0" * 64,
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(
+            payload(response)["error"],
+            "Provisioning executor idempotencyKey does not match current plan",
+        )
+
+    def test_executor_rejects_mismatched_plan_key(self):
+        event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "dry-run",
+            "planKey": "not-the-generated-plan",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(payload(response)["error"], "Provisioning executor planKey does not match current plan")
 
 
 class TestAuthServiceAuthorizer(unittest.TestCase):

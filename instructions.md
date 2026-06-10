@@ -78,6 +78,20 @@ Inactive profiles return the same public shape with `enabled: false`; profile st
 
 Provisioning-plan requests accept only `domain` and `authProfileId`. The response is versioned and deterministic so a future executor can resume safely without inventing new identifiers: it includes `planVersion`, `planKey`, lifecycle state, runtime public-client config, hosted UI details, expected post-activation outputs, normalized social IdP references, and per-operation `operationKey` plus `idempotencyKey` values. `planned` and `provisioning` return resumable operations toward `active`; `active` returns an explicit noop plan; `suspended` and `failed` return explicit manual-review plans. Social IdPs stay reference-only; no secret values are resolved or echoed.
 
+`POST /auth/provisioning-executor`
+
+```json
+{
+  "domain": "music.lynxpardelle.com",
+  "authProfileId": "staff",
+  "mode": "dry-run",
+  "planKey": "optional-current-plan-key",
+  "idempotencyKey": "optional-64-character-hex-key"
+}
+```
+
+`/auth/provisioning-executor` is server-only and must stay IAM-authorized. Requests accept only `domain`, `authProfileId`, `mode`, optional `planKey`, and optional `idempotencyKey`. `dry-run` regenerates and validates the current plan, returns sanitized operation previews and a deterministic audit event, and does not perform AWS writes, call Cognito, or create/update/delete resources; it may read the server-only registry from the configured local or deployed sources. `apply` is explicit but fails closed with manual review required; it is not implemented and must not create Cognito resources until a future approved deploy/provisioning pass.
+
 ## Server-Only Policy
 
 Published drafts can include `server/integrations.json` in the config payload bucket. Runtime-read must not expose this file to the browser.
@@ -222,6 +236,7 @@ The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for futur
 - Public auth runtime config exposes only safe public metadata and never exposes client secrets or social IdP secret refs.
 - Public auth runtime config rejects browser origins that do not belong to the requested domain or a proven managed alias for that domain.
 - Server-only provisioning plans are denied by default, remain plan-only until a future explicit deployment/provisioning decision, and expose stable operation/idempotency keys for a future executor.
+- Server-only provisioning executor dry-run returns sanitized previews and audit keys without secret refs; apply remains closed/no-op until explicitly approved and implemented.
 - The reusable JWT authorizer can protect future blogs, dashboards, uploads, and mutable actions using the same server-only registry policy.
 - The browser cannot choose arbitrary upstream URLs.
 - The browser cannot send undeclared input fields.
@@ -238,3 +253,4 @@ The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for futur
 - This repo does not deploy itself automatically.
 - This repo does not expose `server/integrations.json` through runtime-read.
 - This repo does not create Cognito user pools, app clients, domains, Google/Facebook IdPs, API Gateway authorizers, or IAM roles unless a future deploy/provisioning step is explicitly run.
+- This repo does not execute Cognito provisioning through the scaffolded executor; the apply mode currently returns a safe not-implemented response.
