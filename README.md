@@ -81,6 +81,35 @@ python .\tools\ensure_secret_placeholders.py --region us-east-1
 
 The legacy script creates only missing Secrets Manager entries under `zoolanding/api/` and does not overwrite existing secrets. Prefer creating a matching SSM SecureString parameter such as `/zoolanding/api/music/tidal`; after creation, replace `__SET_IN_AWS_CONSOLE__` placeholders through AWS-managed secret tooling, not in repo files.
 
+Zoosite social auth credentials use server-only Secrets Manager refs under `/zoolanding/auth/zoosite/staff/{provider}`. The loader reads values from environment variables or hidden prompts and writes only sanitized status output:
+
+```powershell
+# Optional check: reports existence/shape only, never values.
+python .\tools\auth_idp_secret_loader.py --mode check --provider all
+
+# Non-interactive load. Set these only in the local shell, never in files or PR text.
+$env:GOOGLE_CLIENT_ID = "<google OAuth client id>"
+$env:GOOGLE_CLIENT_SECRET = "<google OAuth client secret>"
+$env:FACEBOOK_CLIENT_ID = "<facebook app id>"
+$env:FACEBOOK_CLIENT_SECRET = "<facebook app secret>"
+
+python .\tools\auth_idp_secret_loader.py --mode upsert --provider all --dry-run --no-prompt
+python .\tools\auth_idp_secret_loader.py --mode upsert --provider all --no-prompt
+python .\tools\auth_idp_secret_loader.py --mode check --provider all
+
+Remove-Item Env:\GOOGLE_CLIENT_ID, Env:\GOOGLE_CLIENT_SECRET, Env:\FACEBOOK_CLIENT_ID, Env:\FACEBOOK_CLIENT_SECRET
+```
+
+The expected refs are `/zoolanding/auth/zoosite/staff/google` and `/zoolanding/auth/zoosite/staff/facebook`, each stored as JSON with `clientId` and `clientSecret`. The loader uses a temporary `file://` secret payload so the secret values are not passed as command-line arguments.
+
+For the Zoosite Cognito pilot, configure Google and Facebook OAuth apps with this external IdP redirect URI before loading credentials:
+
+```text
+https://zoosite-staff-planned.auth.us-east-1.amazoncognito.com/oauth2/idpresponse
+```
+
+The planned public app client callback URLs are `https://zoositioweb.com.mx/auth/callback` and `https://zoositioweb.com/auth/callback`; logout URLs are `https://zoositioweb.com.mx/acceso` and `https://zoositioweb.com/acceso`.
+
 ## Security Model
 
 - Credentials are stored in SSM SecureString and referenced by `credentialRef`.

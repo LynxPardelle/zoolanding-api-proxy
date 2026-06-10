@@ -129,3 +129,10 @@
 - Read-only Cognito verification returned `[]` for user pools containing `zoosite` or `zoolanding`; no real Cognito resources were created.
 - Current blocker for real apply: the live plan has Google and Facebook provider refs, but both provider credential refs are missing in AWS. Real apply must stay disabled until those real IdP credentials exist and pass non-placeholder preflight.
 - Operational note: avoid `aws configure export-credentials --format env` in visible tool output; capture `--format process` output in memory instead. The earlier visible export output should be treated as a credential exposure and the local IAM access key should be rotated.
+
+## 2026-06-10 00:00 CT - Zoosite Social IdP Secret Loader
+
+- Added `tools/auth_idp_secret_loader.py` to check or upsert Zoosite Google/Facebook social IdP credentials into Secrets Manager refs `/zoolanding/auth/zoosite/staff/google` and `/zoolanding/auth/zoosite/staff/facebook`.
+- The loader accepts credentials from local environment variables or hidden prompts, writes JSON with `clientId` and `clientSecret`, uses a temporary `file://` payload instead of putting secret values in AWS CLI arguments, and prints only sanitized provider/ref/action status.
+- Live check mode confirmed both refs are still missing in AWS; no secret values were created, changed, or printed in this step.
+- Zoosite external IdP redirect URI for Google/Facebook setup is `https://zoosite-staff-planned.auth.us-east-1.amazoncognito.com/oauth2/idpresponse`. Planned public callback URLs are `https://zoositioweb.com.mx/auth/callback` and `https://zoositioweb.com/auth/callback`; logout URLs are `https://zoositioweb.com.mx/acceso` and `https://zoositioweb.com/acceso`.
