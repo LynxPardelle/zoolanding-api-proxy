@@ -1972,6 +1972,67 @@ class TestAuthRegistryAdapter(unittest.TestCase):
             "sites/example.test/versions/v1/example.test/server/auth-profile-registry.json",
         )
 
+    def test_registry_adapter_uses_test_published_environment_for_shared_test_origin(self):
+        metadata = {
+            "published": {
+                "versionId": "prod",
+                "prefix": "sites/example.test/versions/prod",
+            },
+            "publishedEnvironments": {
+                "test": {
+                    "versionId": "test",
+                    "prefix": "sites/example.test/versions/test",
+                },
+            },
+        }
+
+        previous_origin = auth._AUTH_REQUEST_ORIGIN
+        try:
+            auth._AUTH_REQUEST_ORIGIN = "https://test.zoolandingpage.com.mx"
+            with patch.object(auth, "load_item", return_value=metadata), \
+                    patch.object(auth, "load_json_from_s3", return_value=active_registry()) as load_json:
+                result = auth.load_auth_registry_for_domain("example.test")
+        finally:
+            auth._AUTH_REQUEST_ORIGIN = previous_origin
+
+        self.assertEqual(result["version"], 1)
+        load_json.assert_called_once_with(
+            "zoolanding-config-payloads",
+            "sites/example.test/versions/test/example.test/server/auth-profile-registry.json",
+        )
+
+    def test_registry_adapter_uses_environment_alias_published_registry(self):
+        metadata = {
+            "published": {
+                "versionId": "prod",
+                "prefix": "sites/example.test/versions/prod",
+            },
+            "environmentAliases": {
+                "test": ["test.example.test"],
+            },
+            "publishedEnvironments": {
+                "test": {
+                    "versionId": "test",
+                    "prefix": "sites/example.test/versions/test",
+                },
+            },
+        }
+
+        previous_origin = auth._AUTH_REQUEST_ORIGIN
+        try:
+            auth._AUTH_REQUEST_ORIGIN = "https://test.example.test"
+            with patch.object(auth, "load_item", return_value=metadata), \
+                    patch.object(auth, "load_json_from_s3", return_value=active_registry()) as load_json:
+                result = auth.load_auth_registry_for_domain("example.test")
+        finally:
+            auth._AUTH_REQUEST_ORIGIN = previous_origin
+
+        self.assertEqual(result["version"], 1)
+        load_json.assert_called_once_with(
+            "zoolanding-config-payloads",
+            "sites/example.test/versions/test/example.test/server/auth-profile-registry.json",
+        )
+
     def test_registry_validation_rejects_raw_secret_material(self):
         registry = active_registry()
         registry["profiles"][0]["clientSecret"] = "raw-secret-value"

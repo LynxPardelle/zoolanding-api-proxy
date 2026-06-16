@@ -212,7 +212,7 @@ def load_auth_registry_for_domain(domain: str) -> Dict[str, Any]:
     if not isinstance(metadata, dict):
         raise AuthNotFoundError("Site metadata not found")
 
-    published = metadata.get("published") if isinstance(metadata.get("published"), dict) else None
+    published = _auth_registry_published_config(metadata)
     if not published:
         raise AuthNotFoundError("Published configuration not found")
 
@@ -227,6 +227,53 @@ def load_auth_registry_for_domain(domain: str) -> Dict[str, Any]:
         raise AuthNotFoundError("Auth profile registry not found")
     validate_auth_registry(registry)
     return registry
+
+
+def _auth_registry_published_config(metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    environment = _auth_registry_environment_for_origin(metadata, _AUTH_REQUEST_ORIGIN)
+    if environment:
+        published_environments = metadata.get("publishedEnvironments")
+        if isinstance(published_environments, dict):
+            published = published_environments.get(environment)
+            if isinstance(published, dict):
+                return published
+        if environment == "test":
+            draft = metadata.get("draft")
+            if isinstance(draft, dict):
+                return draft
+
+    published = metadata.get("published")
+    return published if isinstance(published, dict) else None
+
+
+def _auth_registry_environment_for_origin(metadata: Dict[str, Any], origin: Optional[str]) -> str:
+    if not origin:
+        return ""
+    if is_local_cors_origin(origin):
+        return ""
+
+    origin_domain = normalize_domain(origin_hostname(origin))
+    if not origin_domain:
+        return ""
+    if origin_domain == TEST_PREVIEW_ORIGIN_HOST:
+        return "test"
+
+    environments = metadata.get("environments")
+    if isinstance(environments, dict):
+        for environment_name, environment in environments.items():
+            if not isinstance(environment, dict):
+                continue
+            aliases = _string_list(environment.get("aliases")) + _string_list(environment.get("domains"))
+            if origin_domain in {normalize_domain(alias) for alias in aliases}:
+                return str(environment_name).strip()
+
+    environment_aliases = metadata.get("environmentAliases")
+    if isinstance(environment_aliases, dict):
+        for environment_name, aliases in environment_aliases.items():
+            if origin_domain in {normalize_domain(alias) for alias in _string_list(aliases)}:
+                return str(environment_name).strip()
+
+    return ""
 
 
 def validate_auth_registry(registry: Dict[str, Any]) -> None:
