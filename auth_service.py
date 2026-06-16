@@ -105,6 +105,9 @@ SAFE_PUBLIC_AUTH_METADATA_KEYS = {
     "tokenEndpoint",
     "tokenEndpointUrl",
 }
+SAFE_AUTH_POLICY_KEYS = {
+    "passwordRecovery",
+}
 
 
 class AuthServiceError(Exception):
@@ -2418,6 +2421,9 @@ def _reject_raw_secret_material(value: Any, path: str = "") -> None:
                 _validate_secret_ref_value(child, normalized_key)
                 continue
             if normalized_key in SAFE_PUBLIC_AUTH_METADATA_KEYS:
+                _reject_raw_secret_material(child, f"{path}.{normalized_key}" if path else normalized_key)
+                continue
+            if normalized_key in SAFE_AUTH_POLICY_KEYS:
                 _reject_raw_secret_material(child, f"{path}.{normalized_key}" if path else normalized_key)
                 continue
             if normalized_key not in ALLOWED_SECRET_REFERENCE_KEYS and RAW_SECRET_KEY_RE.search(normalized_key):

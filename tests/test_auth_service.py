@@ -402,6 +402,11 @@ class TestAuthServiceCustomAuthForms(unittest.TestCase):
         }
         return registry
 
+    def test_registry_validation_accepts_custom_password_recovery_policy_key(self):
+        registry = self.custom_auth_registry()
+
+        auth.validate_auth_registry(registry)
+
     def fake_aws(self):
         reset_auth_clients()
         cognito = FakeCognitoClient()
