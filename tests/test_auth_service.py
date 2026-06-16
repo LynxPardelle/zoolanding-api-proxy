@@ -384,7 +384,280 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
         self.assertTrue(payload(response)["auth"]["enabled"])
 
 
+class TestAuthServiceCustomAuthForms(unittest.TestCase):
+    def custom_auth_registry(self):
+        registry = active_registry()
+        registry["profiles"][0]["customAuth"] = {
+            "signin": {
+                "enabled": True,
+            },
+            "signup": {
+                "enabled": True,
+                "setTenantClaim": True,
+                "defaultGroups": ["Editors"],
+            },
+            "passwordRecovery": {
+                "enabled": True,
+            },
+        }
+        return registry
+
+    def fake_aws(self):
+        reset_auth_clients()
+        cognito = FakeCognitoClient()
+        dynamodb = FakeDynamoClient()
+        ssm = FakeSsmClient({})
+        secrets = FakeSecretsClient()
+        return cognito, FakeBoto3(cognito=cognito, dynamodb=dynamodb, ssm=ssm, secrets=secrets)
+
+    def test_custom_signup_derives_tenant_and_group_policy_server_side(self):
+        cognito, fake_boto3 = self.fake_aws()
+        event = api_event("/auth/signup", {
+            "domain": "Example.Test",
+            "authProfileId": "staff",
+            "email": "New.User@Example.Test",
+            "password": "StrongPassphrase123!",
+            "language": "es",
+            "tenantId": "evil-tenant",
+            "groups": ["Admins"],
+        }, headers={"Origin": "https://example.test"})
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=self.custom_auth_registry()), \
+                patch.object(auth, "boto3", fake_boto3):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        serialized = json.dumps(body, sort_keys=True)
+        self.assertEqual(response["statusCode"], 400)
+        self.assertFalse(body["ok"])
+        self.assertIn("Unsupported signup option", body["error"])
+        self.assertEqual(cognito.calls, [])
+        self.assertNotIn("StrongPassphrase123", serialized)
+
+        clean_event = api_event("/auth/signup", {
+            "domain": "Example.Test",
+            "authProfileId": "staff",
+            "email": "New.User@Example.Test",
+            "password": "StrongPassphrase123!",
+            "language": "es",
+        }, headers={"Origin": "https://example.test"})
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=self.custom_auth_registry()), \
+                patch.object(auth, "boto3", fake_boto3):
+            response = auth.auth_lambda_handler(clean_event, Ctx())
+
+        body = payload(response)
+        serialized = json.dumps(body, sort_keys=True)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["authProfileId"], "staff")
+        self.assertEqual(body["status"], "confirmation-required")
+        self.assertNotIn("password", serialized.lower())
+        self.assertNotIn("StrongPassphrase123", serialized)
+        self.assertEqual([call[0] for call in cognito.calls], ["sign_up", "admin_add_user_to_group"])
+        sign_up = cognito.calls[0][1]
+        self.assertEqual(sign_up["ClientId"], "public-client-id")
+        self.assertEqual(sign_up["Username"], "new.user@example.test")
+        self.assertEqual(sign_up["UserAttributes"], [
+            {"Name": "email", "Value": "new.user@example.test"},
+            {"Name": "custom:tenant_id", "Value": "tenant-a"},
+        ])
+        self.assertEqual(sign_up["ClientMetadata"], {
+            "domain": "example.test",
+            "authProfileId": "staff",
+            "language": "es",
+        })
+        group_call = cognito.calls[1][1]
+        self.assertEqual(group_call["UserPoolId"], "us-east-1_pool")
+        self.assertEqual(group_call["Username"], "new.user@example.test")
+        self.assertEqual(group_call["GroupName"], "Editors")
+
+    def test_custom_signin_returns_public_session_without_token_material(self):
+        cognito, fake_boto3 = self.fake_aws()
+        event = api_event("/auth/signin", {
+            "domain": "example.test",
+            "authProfileId": "staff",
+            "email": "Client@Example.Test",
+            "password": "StrongPassphrase123!",
+            "language": "es",
+            "tenantId": "evil",
+        }, headers={"Origin": "https://example.test"})
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=self.custom_auth_registry()), \
+                patch.object(auth, "boto3", fake_boto3):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(cognito.calls, [])
+
+        clean_event = api_event("/auth/signin", {
+            "domain": "example.test",
+            "authProfileId": "staff",
+            "email": "Client@Example.Test",
+            "password": "StrongPassphrase123!",
+            "language": "es",
+        }, headers={"Origin": "https://example.test"})
+
+        verified_claims = {
+            "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+            "aud": "public-client-id",
+            "sub": "user-123",
+            "email": "client@example.test",
+            "name": "Client Example",
+            "custom:tenant_id": "tenant-a",
+            "cognito:groups": ["Editors"],
+            "exp": 1999999999,
+        }
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=self.custom_auth_registry()), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.object(auth, "verify_jwt", return_value=verified_claims) as verify_jwt:
+            response = auth.auth_lambda_handler(clean_event, Ctx())
+
+        body = payload(response)
+        serialized = json.dumps(body, sort_keys=True)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["status"], "signed-in")
+        self.assertEqual(body["session"]["profile"]["subject"], "user-123")
+        self.assertEqual(body["session"]["profile"]["email"], "client@example.test")
+        self.assertEqual(body["session"]["profile"]["roles"], ["Editors"])
+        self.assertEqual(body["session"]["provider"], "cognito")
+        self.assertEqual(body["session"]["expiresAtEpochMs"], 1999999999000)
+        self.assertNotIn("id-token-value", serialized)
+        self.assertNotIn("StrongPassphrase123", serialized)
+        self.assertNotIn("password", serialized.lower())
+        self.assertEqual([call[0] for call in cognito.calls], ["initiate_auth"])
+        self.assertEqual(cognito.calls[0][1]["AuthFlow"], "USER_PASSWORD_AUTH")
+        self.assertEqual(cognito.calls[0][1]["ClientId"], "public-client-id")
+        self.assertEqual(cognito.calls[0][1]["AuthParameters"], {
+            "USERNAME": "client@example.test",
+            "PASSWORD": "StrongPassphrase123!",
+        })
+        verify_jwt.assert_called_once()
+
+    def test_password_recovery_uses_profile_client_and_never_accepts_tenant_policy(self):
+        cognito, fake_boto3 = self.fake_aws()
+        event = api_event("/auth/forgot-password", {
+            "domain": "example.test",
+            "authProfileId": "staff",
+            "email": "new.user@example.test",
+            "custom:tenant_id": "evil",
+        }, headers={"Origin": "https://example.test"})
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=self.custom_auth_registry()), \
+                patch.object(auth, "boto3", fake_boto3):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(cognito.calls, [])
+
+        clean_event = api_event("/auth/forgot-password", {
+            "domain": "example.test",
+            "authProfileId": "staff",
+            "email": "new.user@example.test",
+            "language": "es",
+        }, headers={"Origin": "https://example.test"})
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=self.custom_auth_registry()), \
+                patch.object(auth, "boto3", fake_boto3):
+            response = auth.auth_lambda_handler(clean_event, Ctx())
+
+        body = payload(response)
+        serialized = json.dumps(body, sort_keys=True)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["status"], "code-sent")
+        self.assertNotIn("tenant-a", serialized)
+        self.assertEqual([call[0] for call in cognito.calls], ["forgot_password"])
+        self.assertEqual(cognito.calls[0][1]["ClientId"], "public-client-id")
+        self.assertEqual(cognito.calls[0][1]["Username"], "new.user@example.test")
+        self.assertEqual(cognito.calls[0][1]["ClientMetadata"], {
+            "domain": "example.test",
+            "authProfileId": "staff",
+            "language": "es",
+        })
+
+    def test_confirmation_and_password_reset_complete_the_custom_auth_lifecycle(self):
+        cognito, fake_boto3 = self.fake_aws()
+        requests = [
+            ("/auth/confirm-signup", {
+                "domain": "example.test",
+                "authProfileId": "staff",
+                "email": "new.user@example.test",
+                "code": "123456",
+                "language": "es",
+            }, "confirm_sign_up", "confirmed"),
+            ("/auth/resend-confirmation", {
+                "domain": "example.test",
+                "authProfileId": "staff",
+                "email": "new.user@example.test",
+                "language": "es",
+            }, "resend_confirmation_code", "code-sent"),
+            ("/auth/confirm-forgot-password", {
+                "domain": "example.test",
+                "authProfileId": "staff",
+                "email": "new.user@example.test",
+                "code": "654321",
+                "password": "NewStrongPassphrase123!",
+                "language": "es",
+            }, "confirm_forgot_password", "password-reset"),
+        ]
+
+        for path, body, expected_call, expected_status in requests:
+            with patch.object(auth, "load_auth_registry_for_domain", return_value=self.custom_auth_registry()), \
+                    patch.object(auth, "boto3", fake_boto3):
+                response = auth.auth_lambda_handler(api_event(path, body, headers={"Origin": "https://example.test"}), Ctx())
+
+            parsed = payload(response)
+            self.assertEqual(response["statusCode"], 200)
+            self.assertTrue(parsed["ok"])
+            self.assertEqual(parsed["status"], expected_status)
+
+        self.assertEqual(
+            [call[0] for call in cognito.calls],
+            ["confirm_sign_up", "resend_confirmation_code", "confirm_forgot_password"],
+        )
+        self.assertEqual(cognito.calls[0][1]["ConfirmationCode"], "123456")
+        self.assertEqual(cognito.calls[1][1]["Username"], "new.user@example.test")
+        self.assertEqual(cognito.calls[2][1]["ConfirmationCode"], "654321")
+        self.assertEqual(cognito.calls[2][1]["Password"], "NewStrongPassphrase123!")
+
+
 class TestAuthServiceTemplateContract(unittest.TestCase):
+    def test_custom_auth_form_routes_are_public_post_routes(self):
+        with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
+            template = template_file.read()
+
+        for logical_id, path in (
+            ("AuthSigninPost", "/auth/signin"),
+            ("AuthSignupPost", "/auth/signup"),
+            ("AuthConfirmSignupPost", "/auth/confirm-signup"),
+            ("AuthResendConfirmationPost", "/auth/resend-confirmation"),
+            ("AuthForgotPasswordPost", "/auth/forgot-password"),
+            ("AuthConfirmForgotPasswordPost", "/auth/confirm-forgot-password"),
+        ):
+            self.assertRegex(
+                template,
+                re.compile(
+                    rf"{logical_id}:.*?Path:\s*{re.escape(path)}.*?Method:\s*POST",
+                    re.S,
+                ),
+            )
+
+    def test_api_proxy_has_cognito_self_service_permissions_only_for_auth_forms(self):
+        with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
+            template = template_file.read()
+
+        api_proxy = template_resource_block(template, "ApiProxyFunction")
+        self.assertIn("cognito-idp:InitiateAuth", api_proxy)
+        self.assertIn("cognito-idp:SignUp", api_proxy)
+        self.assertIn("cognito-idp:ConfirmSignUp", api_proxy)
+        self.assertIn("cognito-idp:ResendConfirmationCode", api_proxy)
+        self.assertIn("cognito-idp:ForgotPassword", api_proxy)
+        self.assertIn("cognito-idp:ConfirmForgotPassword", api_proxy)
+        self.assertIn("cognito-idp:AdminAddUserToGroup", api_proxy)
+        self.assertRegex(api_proxy, re.compile(r"arn:aws:cognito-idp:\$\{AWS::Region\}:\$\{AWS::AccountId\}:userpool/\*"))
+
     def test_provisioning_plan_post_route_requires_aws_iam_authorizer(self):
         with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
             template = template_file.read()
@@ -426,7 +699,10 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
                 re.S,
             ),
         )
-        self.assertNotIn("cognito-idp:", api_proxy)
+        self.assertNotIn("cognito-idp:CreateUserPool", api_proxy)
+        self.assertNotIn("cognito-idp:CreateUserPoolClient", api_proxy)
+        self.assertNotIn("cognito-idp:CreateIdentityProvider", api_proxy)
+        self.assertNotIn("cognito-idp:UpdateUserPoolClient", api_proxy)
 
     def test_provisioning_executor_template_grants_minimal_apply_permissions_only_to_executor(self):
         with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
@@ -495,7 +771,10 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
         self.assertIn("cognito-idp:ListUserPoolClients", scoped_actions)
         self.assertNotIn("cognito-idp:ListTagsForResource", wildcard_actions)
         self.assertNotIn("cognito-idp:ListUserPoolClients", wildcard_actions)
-        self.assertNotIn("cognito-idp:", api_proxy)
+        self.assertNotIn("cognito-idp:CreateUserPool", api_proxy)
+        self.assertNotIn("cognito-idp:CreateUserPoolClient", api_proxy)
+        self.assertNotIn("cognito-idp:CreateIdentityProvider", api_proxy)
+        self.assertNotIn("cognito-idp:UpdateUserPoolClient", api_proxy)
 
 
 class TestAuthServiceProvisioningPlan(unittest.TestCase):
@@ -857,6 +1136,53 @@ class FakeCognitoClient:
     def update_identity_provider(self, **kwargs):
         self._record("update_identity_provider", **kwargs)
         return {"IdentityProvider": {"ProviderName": kwargs["ProviderName"]}}
+
+    def initiate_auth(self, **kwargs):
+        self._record("initiate_auth", **kwargs)
+        return {"AuthenticationResult": {"IdToken": "id-token-value"}}
+
+    def sign_up(self, **kwargs):
+        self._record("sign_up", **kwargs)
+        return {
+            "UserConfirmed": False,
+            "CodeDeliveryDetails": {
+                "Destination": "n***@e***",
+                "DeliveryMedium": "EMAIL",
+                "AttributeName": "email",
+            },
+        }
+
+    def admin_add_user_to_group(self, **kwargs):
+        self._record("admin_add_user_to_group", **kwargs)
+        return {}
+
+    def forgot_password(self, **kwargs):
+        self._record("forgot_password", **kwargs)
+        return {
+            "CodeDeliveryDetails": {
+                "Destination": "n***@e***",
+                "DeliveryMedium": "EMAIL",
+                "AttributeName": "email",
+            },
+        }
+
+    def confirm_sign_up(self, **kwargs):
+        self._record("confirm_sign_up", **kwargs)
+        return {}
+
+    def resend_confirmation_code(self, **kwargs):
+        self._record("resend_confirmation_code", **kwargs)
+        return {
+            "CodeDeliveryDetails": {
+                "Destination": "n***@e***",
+                "DeliveryMedium": "EMAIL",
+                "AttributeName": "email",
+            },
+        }
+
+    def confirm_forgot_password(self, **kwargs):
+        self._record("confirm_forgot_password", **kwargs)
+        return {}
 
 
 class FakeDynamoClient:

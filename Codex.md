@@ -151,3 +151,10 @@
 - The loader accepts credentials from local environment variables or hidden prompts, writes JSON with `clientId` and `clientSecret`, uses a temporary `file://` payload instead of putting secret values in AWS CLI arguments, and prints only sanitized provider/ref/action status.
 - Live check mode confirmed both refs are still missing in AWS; no secret values were created, changed, or printed in this step.
 - Zoosite external IdP redirect URI for Google/Facebook setup is `https://zoosite-staff-planned.auth.us-east-1.amazoncognito.com/oauth2/idpresponse`. Planned public callback URLs are `https://zoositioweb.com.mx/auth/callback` and `https://zoositioweb.com/auth/callback`; logout URLs are `https://zoositioweb.com.mx/acceso` and `https://zoositioweb.com/acceso`.
+
+## 2026-06-16 11:49 CT - Optional custom auth form endpoints
+
+- Added public optional Cognito self-service endpoints for generic draft auth forms: `/auth/signin`, `/auth/signup`, `/auth/confirm-signup`, `/auth/resend-confirmation`, `/auth/forgot-password`, and `/auth/confirm-forgot-password`.
+- These endpoints are disabled unless the resolved active server-only auth profile enables the matching `customAuth` policy. Browser payloads may carry only public form inputs; tenant claims, default groups, user-pool policy, and billing isolation are resolved from the private profile.
+- `ApiProxyFunction` now has only the Cognito self-service actions needed by custom forms plus `AdminAddUserToGroup` for server-approved signup default groups. Signin uses `InitiateAuth` and returns only sanitized public session metadata, not token material. Provisioning and destructive Cognito actions remain outside the public proxy boundary.
+- No deploy, AWS call, Cognito mutation, secret, token, or user creation was performed in this implementation pass.

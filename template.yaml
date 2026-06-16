@@ -124,6 +124,20 @@ Resources:
                 Fn::GetAtt:
                   - AuthProvisioningStateTable
                   - Arn
+            - Effect: Allow
+              Action:
+                - cognito-idp:InitiateAuth
+                - cognito-idp:SignUp
+                - cognito-idp:ConfirmSignUp
+                - cognito-idp:ResendConfirmationCode
+                - cognito-idp:ForgotPassword
+                - cognito-idp:ConfirmForgotPassword
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminAddUserToGroup
+              Resource:
+                Fn::Sub: arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
       Events:
         ApiProxyRead:
           Type: Api
@@ -173,6 +187,90 @@ Resources:
             RestApiId:
               Ref: ApiProxyApi
             Path: /auth/runtime-config
+            Method: OPTIONS
+        AuthSigninPost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/signin
+            Method: POST
+        AuthSigninOptions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/signin
+            Method: OPTIONS
+        AuthSignupPost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/signup
+            Method: POST
+        AuthSignupOptions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/signup
+            Method: OPTIONS
+        AuthConfirmSignupPost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/confirm-signup
+            Method: POST
+        AuthConfirmSignupOptions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/confirm-signup
+            Method: OPTIONS
+        AuthResendConfirmationPost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/resend-confirmation
+            Method: POST
+        AuthResendConfirmationOptions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/resend-confirmation
+            Method: OPTIONS
+        AuthForgotPasswordPost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/forgot-password
+            Method: POST
+        AuthForgotPasswordOptions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/forgot-password
+            Method: OPTIONS
+        AuthConfirmForgotPasswordPost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/confirm-forgot-password
+            Method: POST
+        AuthConfirmForgotPasswordOptions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth/confirm-forgot-password
             Method: OPTIONS
         AuthProvisioningPlanPost:
           Type: Api

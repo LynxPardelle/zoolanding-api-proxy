@@ -51,7 +51,17 @@ _DYNAMODB_CLIENT = None
 _SSM_CLIENT = None
 _SECRETS_CLIENT = None
 
-AUTH_PATHS = {"/auth/runtime-config", "/auth/provisioning-plan", "/auth/provisioning-executor"}
+AUTH_PATHS = {
+    "/auth/runtime-config",
+    "/auth/provisioning-plan",
+    "/auth/provisioning-executor",
+    "/auth/signin",
+    "/auth/signup",
+    "/auth/confirm-signup",
+    "/auth/resend-confirmation",
+    "/auth/forgot-password",
+    "/auth/confirm-forgot-password",
+}
 AUTH_PROFILE_STATUSES = {"active", "planned", "provisioning", "suspended", "failed"}
 AUTH_PROVISIONING_PLAN_SCHEMA_VERSION = "2026-06-10.v1"
 AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION = "2026-06-10.executor.v1"
@@ -61,6 +71,12 @@ RAW_SECRET_KEY_RE = re.compile(r"(secret|token|password|private[_-]?key|credenti
 RUNTIME_CONFIG_ALLOWED_KEYS = {"domain", "authProfileId"}
 PROVISIONING_PLAN_ALLOWED_KEYS = {"domain", "authProfileId"}
 PROVISIONING_EXECUTOR_ALLOWED_KEYS = {"domain", "authProfileId", "mode", "planKey", "idempotencyKey"}
+CUSTOM_SIGNIN_ALLOWED_KEYS = {"domain", "authProfileId", "email", "password", "language"}
+CUSTOM_SIGNUP_ALLOWED_KEYS = {"domain", "authProfileId", "email", "password", "language"}
+CUSTOM_CONFIRM_SIGNUP_ALLOWED_KEYS = {"domain", "authProfileId", "email", "code", "language"}
+CUSTOM_RESEND_CONFIRMATION_ALLOWED_KEYS = {"domain", "authProfileId", "email", "language"}
+CUSTOM_PASSWORD_RECOVERY_ALLOWED_KEYS = {"domain", "authProfileId", "email", "language"}
+CUSTOM_CONFIRM_PASSWORD_RECOVERY_ALLOWED_KEYS = {"domain", "authProfileId", "email", "code", "password", "language"}
 PROVISIONING_EXECUTOR_MODES = {"dry-run", "apply"}
 ALIAS_TARGET_KEYS = (
     "domain",
@@ -142,6 +158,24 @@ def auth_lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if path == "/auth/provisioning-executor" and method == "POST":
             payload = _request_payload(event)
             return _provisioning_executor_response(event, payload)
+        if path == "/auth/signin" and method == "POST":
+            payload = _request_payload(event)
+            return _custom_signin_response(payload)
+        if path == "/auth/signup" and method == "POST":
+            payload = _request_payload(event)
+            return _custom_signup_response(payload)
+        if path == "/auth/confirm-signup" and method == "POST":
+            payload = _request_payload(event)
+            return _custom_confirm_signup_response(payload)
+        if path == "/auth/resend-confirmation" and method == "POST":
+            payload = _request_payload(event)
+            return _custom_resend_confirmation_response(payload)
+        if path == "/auth/forgot-password" and method == "POST":
+            payload = _request_payload(event)
+            return _custom_forgot_password_response(payload)
+        if path == "/auth/confirm-forgot-password" and method == "POST":
+            payload = _request_payload(event)
+            return _custom_confirm_forgot_password_response(payload)
         return _auth_response(404, {"ok": False, "error": "Auth service route not found"})
     except ValueError as exc:
         return _auth_response(400, {"ok": False, "error": str(exc)})
@@ -338,6 +372,216 @@ def _runtime_config_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     status = _profile_status(profile)
     auth_payload = _public_runtime_auth(profile, enabled=status == "active")
     return _auth_response(200, {"ok": True, "domain": domain, "auth": auth_payload})
+
+
+def _custom_signin_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _reject_unsupported_custom_signin_options(payload)
+    domain, profile = _custom_auth_profile(payload, "signin")
+    email = _email(payload.get("email"))
+    password = _password(payload.get("password"))
+    language = _language(payload.get("language"))
+    client_id = _custom_auth_client_id(profile)
+
+    try:
+        response = _cognito_idp().initiate_auth(
+            ClientId=client_id,
+            AuthFlow="USER_PASSWORD_AUTH",
+            AuthParameters={
+                "USERNAME": email,
+                "PASSWORD": password,
+            },
+            ClientMetadata=_custom_auth_client_metadata(domain, profile, language),
+        )
+    except Exception as exc:
+        log("WARNING", "Custom Cognito signin failed", domain=domain, authProfileId=_profile_id(profile), errorType=type(exc).__name__)
+        raise AuthServiceError("Sign-in failed") from exc
+
+    challenge_name = str(response.get("ChallengeName") or "").strip()
+    if challenge_name:
+        return _auth_response(200, {
+            "ok": True,
+            "domain": domain,
+            "authProfileId": _profile_id(profile),
+            "status": "challenge-required",
+            "challengeName": challenge_name,
+        })
+
+    auth_result = response.get("AuthenticationResult")
+    id_token = str(auth_result.get("IdToken") or "").strip() if isinstance(auth_result, dict) else ""
+    if not id_token:
+        raise AuthServiceError("Sign-in failed")
+
+    try:
+        claims = verify_jwt(
+            id_token,
+            issuer=str(profile.get("issuer") or ""),
+            audiences=_audiences(profile),
+            jwks_url=str(profile.get("jwksUrl") or _jwks_url(str(profile.get("issuer") or ""))),
+        )
+    except Exception as exc:
+        log("WARNING", "Custom Cognito signin token validation failed", domain=domain, authProfileId=_profile_id(profile), errorType=type(exc).__name__)
+        raise AuthServiceError("Sign-in failed") from exc
+
+    if not _claims_allowed_for_profile(claims, profile):
+        raise AuthServiceError("Sign-in failed")
+
+    session = _public_session_from_claims(profile, claims)
+    return _auth_response(200, {
+        "ok": True,
+        "domain": domain,
+        "authProfileId": _profile_id(profile),
+        "status": "signed-in",
+        "session": session,
+    })
+
+
+def _custom_signup_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _reject_unsupported_custom_signup_options(payload)
+    domain, profile = _custom_auth_profile(payload, "signup")
+    email = _email(payload.get("email"))
+    password = _password(payload.get("password"))
+    language = _language(payload.get("language"))
+    signup_policy = _custom_auth_policy(profile, "signup")
+    client_id = _custom_auth_client_id(profile)
+    user_pool_id = _profile_user_pool_id(profile)
+    tenant_claim = str(profile.get("tenantClaim") or "custom:tenant_id").strip()
+    tenant_id = str(profile.get("tenantId") or "").strip()
+
+    user_attributes = [{"Name": "email", "Value": email}]
+    if signup_policy.get("setTenantClaim", True) is not False and tenant_claim and tenant_id:
+        user_attributes.append({"Name": tenant_claim, "Value": tenant_id})
+
+    metadata = _custom_auth_client_metadata(domain, profile, language)
+    try:
+        response = _cognito_idp().sign_up(
+            ClientId=client_id,
+            Username=email,
+            Password=password,
+            UserAttributes=user_attributes,
+            ClientMetadata=metadata,
+        )
+        for group_name in _custom_signup_default_groups(profile, signup_policy):
+            _cognito_idp().admin_add_user_to_group(
+                UserPoolId=user_pool_id,
+                Username=email,
+                GroupName=group_name,
+            )
+    except Exception as exc:
+        log("WARNING", "Custom Cognito signup failed", domain=domain, authProfileId=_profile_id(profile), errorType=type(exc).__name__)
+        raise AuthServiceError("Signup failed") from exc
+
+    return _auth_response(200, {
+        "ok": True,
+        "domain": domain,
+        "authProfileId": _profile_id(profile),
+        "status": "signed-up" if response.get("UserConfirmed") is True else "confirmation-required",
+        **_code_delivery_response(response.get("CodeDeliveryDetails")),
+    })
+
+
+def _custom_forgot_password_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _reject_unsupported_custom_password_recovery_options(payload)
+    domain, profile = _custom_auth_profile(payload, "passwordRecovery")
+    email = _email(payload.get("email"))
+    language = _language(payload.get("language"))
+    client_id = _custom_auth_client_id(profile)
+
+    try:
+        response = _cognito_idp().forgot_password(
+            ClientId=client_id,
+            Username=email,
+            ClientMetadata=_custom_auth_client_metadata(domain, profile, language),
+        )
+    except Exception as exc:
+        log("WARNING", "Custom Cognito forgot-password failed", domain=domain, authProfileId=_profile_id(profile), errorType=type(exc).__name__)
+        raise AuthServiceError("Password recovery failed") from exc
+
+    return _auth_response(200, {
+        "ok": True,
+        "domain": domain,
+        "authProfileId": _profile_id(profile),
+        "status": "code-sent",
+        **_code_delivery_response(response.get("CodeDeliveryDetails")),
+    })
+
+
+def _custom_confirm_signup_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _reject_unsupported_custom_confirm_signup_options(payload)
+    domain, profile = _custom_auth_profile(payload, "signup")
+    email = _email(payload.get("email"))
+    code = _code(payload.get("code"))
+    language = _language(payload.get("language"))
+
+    try:
+        _cognito_idp().confirm_sign_up(
+            ClientId=_custom_auth_client_id(profile),
+            Username=email,
+            ConfirmationCode=code,
+            ClientMetadata=_custom_auth_client_metadata(domain, profile, language),
+        )
+    except Exception as exc:
+        log("WARNING", "Custom Cognito confirm-signup failed", domain=domain, authProfileId=_profile_id(profile), errorType=type(exc).__name__)
+        raise AuthServiceError("Signup confirmation failed") from exc
+
+    return _auth_response(200, {
+        "ok": True,
+        "domain": domain,
+        "authProfileId": _profile_id(profile),
+        "status": "confirmed",
+    })
+
+
+def _custom_resend_confirmation_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _reject_unsupported_custom_resend_confirmation_options(payload)
+    domain, profile = _custom_auth_profile(payload, "signup")
+    email = _email(payload.get("email"))
+    language = _language(payload.get("language"))
+
+    try:
+        response = _cognito_idp().resend_confirmation_code(
+            ClientId=_custom_auth_client_id(profile),
+            Username=email,
+            ClientMetadata=_custom_auth_client_metadata(domain, profile, language),
+        )
+    except Exception as exc:
+        log("WARNING", "Custom Cognito resend-confirmation failed", domain=domain, authProfileId=_profile_id(profile), errorType=type(exc).__name__)
+        raise AuthServiceError("Confirmation resend failed") from exc
+
+    return _auth_response(200, {
+        "ok": True,
+        "domain": domain,
+        "authProfileId": _profile_id(profile),
+        "status": "code-sent",
+        **_code_delivery_response(response.get("CodeDeliveryDetails")),
+    })
+
+
+def _custom_confirm_forgot_password_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _reject_unsupported_custom_confirm_password_recovery_options(payload)
+    domain, profile = _custom_auth_profile(payload, "passwordRecovery")
+    email = _email(payload.get("email"))
+    code = _code(payload.get("code"))
+    password = _password(payload.get("password"))
+    language = _language(payload.get("language"))
+
+    try:
+        _cognito_idp().confirm_forgot_password(
+            ClientId=_custom_auth_client_id(profile),
+            Username=email,
+            ConfirmationCode=code,
+            Password=password,
+            ClientMetadata=_custom_auth_client_metadata(domain, profile, language),
+        )
+    except Exception as exc:
+        log("WARNING", "Custom Cognito confirm-forgot-password failed", domain=domain, authProfileId=_profile_id(profile), errorType=type(exc).__name__)
+        raise AuthServiceError("Password reset failed") from exc
+
+    return _auth_response(200, {
+        "ok": True,
+        "domain": domain,
+        "authProfileId": _profile_id(profile),
+        "status": "password-reset",
+    })
 
 
 def _enforce_runtime_origin_domain(origin: Optional[str], domain: str) -> None:
@@ -792,6 +1036,165 @@ def _reject_unsupported_provisioning_options(payload: Dict[str, Any]) -> None:
 def _reject_unsupported_provisioning_executor_options(payload: Dict[str, Any]) -> None:
     if not all(str(key) in PROVISIONING_EXECUTOR_ALLOWED_KEYS for key in payload.keys()):
         raise AuthServiceError("Unsupported auth provisioning executor option")
+
+
+def _reject_unsupported_custom_signin_options(payload: Dict[str, Any]) -> None:
+    if not all(str(key) in CUSTOM_SIGNIN_ALLOWED_KEYS for key in payload.keys()):
+        raise AuthServiceError("Unsupported signin option")
+
+
+def _reject_unsupported_custom_signup_options(payload: Dict[str, Any]) -> None:
+    if not all(str(key) in CUSTOM_SIGNUP_ALLOWED_KEYS for key in payload.keys()):
+        raise AuthServiceError("Unsupported signup option")
+
+
+def _reject_unsupported_custom_confirm_signup_options(payload: Dict[str, Any]) -> None:
+    if not all(str(key) in CUSTOM_CONFIRM_SIGNUP_ALLOWED_KEYS for key in payload.keys()):
+        raise AuthServiceError("Unsupported signup confirmation option")
+
+
+def _reject_unsupported_custom_resend_confirmation_options(payload: Dict[str, Any]) -> None:
+    if not all(str(key) in CUSTOM_RESEND_CONFIRMATION_ALLOWED_KEYS for key in payload.keys()):
+        raise AuthServiceError("Unsupported confirmation resend option")
+
+
+def _reject_unsupported_custom_password_recovery_options(payload: Dict[str, Any]) -> None:
+    if not all(str(key) in CUSTOM_PASSWORD_RECOVERY_ALLOWED_KEYS for key in payload.keys()):
+        raise AuthServiceError("Unsupported password recovery option")
+
+
+def _reject_unsupported_custom_confirm_password_recovery_options(payload: Dict[str, Any]) -> None:
+    if not all(str(key) in CUSTOM_CONFIRM_PASSWORD_RECOVERY_ALLOWED_KEYS for key in payload.keys()):
+        raise AuthServiceError("Unsupported password reset option")
+
+
+def _custom_auth_profile(payload: Dict[str, Any], policy_key: str) -> tuple[str, Dict[str, Any]]:
+    domain = normalize_domain(payload.get("domain"))
+    _enforce_runtime_origin_domain(_AUTH_REQUEST_ORIGIN, domain)
+    registry = load_auth_registry_for_domain(domain)
+    profile = _find_profile(registry, str(payload.get("authProfileId") or registry.get("defaultAuthProfileId") or ""))
+    profile = _profile_with_effective_auth_state(domain, profile)
+    if _profile_status(profile) != "active":
+        raise AuthServiceError("Auth profile is not active")
+    policy = _custom_auth_policy(profile, policy_key)
+    if policy.get("enabled") is not True:
+        raise AuthServiceError(f"Custom auth {policy_key} is disabled")
+    return domain, profile
+
+
+def _custom_auth_policy(profile: Dict[str, Any], policy_key: str) -> Dict[str, Any]:
+    custom_auth = profile.get("customAuth")
+    if not isinstance(custom_auth, dict):
+        return {}
+    policy = custom_auth.get(policy_key)
+    return policy if isinstance(policy, dict) else {}
+
+
+def _custom_auth_client_id(profile: Dict[str, Any]) -> str:
+    client_id = str(profile.get("clientId") or "").strip()
+    if not client_id:
+        audiences = _audiences(profile)
+        client_id = audiences[0] if audiences else ""
+    if not client_id:
+        raise AuthRegistryError("Custom auth profile requires clientId")
+    return client_id
+
+
+def _profile_user_pool_id(profile: Dict[str, Any]) -> str:
+    explicit = str(profile.get("userPoolId") or "").strip()
+    if explicit:
+        return explicit
+    issuer = str(profile.get("issuer") or "").strip()
+    try:
+        parsed = urllib.parse.urlparse(issuer)
+        pool_id = parsed.path.strip("/").split("/")[-1]
+    except Exception:
+        pool_id = ""
+    if not pool_id:
+        raise AuthRegistryError("Custom auth profile requires userPoolId")
+    return pool_id
+
+
+def _custom_signup_default_groups(profile: Dict[str, Any], signup_policy: Dict[str, Any]) -> list[str]:
+    groups = _string_list(signup_policy.get("defaultGroups"))
+    allowed_groups = set(_string_list(profile.get("allowedGroups")))
+    if any(group not in allowed_groups for group in groups):
+        raise AuthRegistryError("Custom signup default groups must be allowed groups")
+    return groups
+
+
+def _custom_auth_client_metadata(domain: str, profile: Dict[str, Any], language: str) -> Dict[str, str]:
+    metadata = {
+        "domain": normalize_domain(domain),
+        "authProfileId": _profile_id(profile),
+    }
+    if language:
+        metadata["language"] = language
+    return metadata
+
+
+def _public_session_from_claims(profile: Dict[str, Any], claims: Dict[str, Any]) -> Dict[str, Any]:
+    subject = str(claims.get("sub") or claims.get("username") or "").strip()
+    expires_at_epoch_seconds = int(claims.get("exp") or 0)
+    if not subject or expires_at_epoch_seconds <= int(time.time()):
+        raise AuthServiceError("Sign-in failed")
+
+    group_claim = str(profile.get("groupClaim") or "cognito:groups")
+    public_profile: Dict[str, Any] = {
+        "subject": subject,
+        "roles": _string_list(claims.get(group_claim)),
+    }
+    display_name = str(claims.get("name") or claims.get("preferred_username") or "").strip()
+    email = str(claims.get("email") or "").strip()
+    if display_name:
+        public_profile["displayName"] = display_name
+    if email:
+        public_profile["email"] = email
+
+    return {
+        "profile": public_profile,
+        "provider": str(profile.get("provider") or "cognito"),
+        "expiresAtEpochMs": expires_at_epoch_seconds * 1000,
+    }
+
+
+def _email(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized or len(normalized) > 320 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized):
+        raise AuthServiceError("Invalid email")
+    return normalized
+
+
+def _password(value: Any) -> str:
+    password = str(value or "")
+    if len(password) < 1 or CONTROL_OR_WHITESPACE_RE.search(password):
+        raise AuthServiceError("Invalid password")
+    return password
+
+
+def _code(value: Any) -> str:
+    code = str(value or "").strip()
+    if not code or len(code) > 128 or CONTROL_OR_WHITESPACE_RE.search(code):
+        raise AuthServiceError("Invalid confirmation code")
+    return code
+
+
+def _language(value: Any) -> str:
+    normalized = str(value or "").strip().replace("_", "-")
+    if not normalized:
+        return ""
+    return normalized if re.fullmatch(r"[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}", normalized) else ""
+
+
+def _code_delivery_response(details: Any) -> Dict[str, Any]:
+    if not isinstance(details, dict):
+        return {}
+    safe_details = {
+        key: str(details.get(key) or "").strip()
+        for key in ("AttributeName", "DeliveryMedium", "Destination")
+        if str(details.get(key) or "").strip()
+    }
+    return {"delivery": safe_details} if safe_details else {}
 
 
 def _executor_mode(payload: Dict[str, Any]) -> str:

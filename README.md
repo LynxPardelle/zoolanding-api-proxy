@@ -7,12 +7,15 @@ The Angular app calls:
 - `POST /api-proxy/read` for configured read data sources.
 - `POST /api-proxy/action` for configured mutable API actions.
 - `GET` or `POST /auth/runtime-config` for public, config-driven auth metadata.
+- `POST /auth/signin`, `/auth/signup`, `/auth/confirm-signup`, `/auth/resend-confirmation`, `/auth/forgot-password`, and `/auth/confirm-forgot-password` for optional custom generic auth forms.
 - `POST /auth/provisioning-plan` for server-only, plan-only Cognito provisioning output.
 - `POST /auth/provisioning-executor` for server-only Cognito executor dry-run and guarded apply.
 
 The browser sends only `domain`, optional `pageId`, `sourceId` or `actionId`, and allowlisted input values. It never sends upstream URLs or credentials. The Lambda resolves the published server-only policy from `server/integrations.json`, loads credentials by `credentialRef` from SSM SecureString, calls the upstream API, filters the response, and returns safe JSON.
 
 Auth profiles are resolved from the published server-only file `server/auth-profile-registry.json`. The runtime auth endpoint accepts only `domain` and `authProfileId`, enforces that the browser `Origin` belongs to the requested domain or to a managed alias for that domain, then returns the same public `runtime.auth` shape validated by the Angular app. Active profiles return `enabled: true`; planned, provisioning, suspended, and failed profiles return the same secret-free public metadata with `enabled: false`. The provisioning endpoint is denied by default, accepts only `domain` and `authProfileId`, and returns only a server-only, plan-only contract when the caller's signed IAM role is explicitly allowlisted by `AUTH_PROVISIONING_ALLOWED_ROLE_NAMES` or `AUTH_PROVISIONING_ALLOWED_ROLE_ARNS`.
+
+Custom auth form endpoints are optional per auth profile. They require the server-only profile to be active and to enable the matching `customAuth` policy before calling Cognito. Browser requests may send only public form inputs such as email, password, confirmation code, language, `domain`, and `authProfileId`; tenant claims, default groups, user pool IDs, and billing boundaries are resolved from the server-only profile. The signup endpoint can set the configured tenant claim and add only server-approved default groups from `allowedGroups`. Signin uses Cognito `USER_PASSWORD_AUTH` and returns only sanitized public session metadata after JWT issuer/audience/tenant/group validation; it does not return ID, access, or refresh tokens. Responses return sanitized statuses and code-delivery metadata only.
 
 Provisioning plans are deterministic and versioned. The response includes a stable `planVersion`, `planKey`, sanitized `configHash`, lifecycle status, runtime public-client shape, hosted UI data, expected post-activation outputs, normalized social IdP references, and per-operation `operationKey` plus `idempotencyKey` values for the executor. `planKey` and operation idempotency are bound to the sanitized desired config, so callback URLs, logout URLs, groups, hosted UI config, scopes, and social provider reference changes produce a new plan. `planned` and `provisioning` return resumable operations; `active` returns an explicit noop plan; `suspended` and `failed` return explicit manual-review plans. No raw social credentials, secret values, tokens, or browser-supplied policy fields are accepted or returned.
 
@@ -29,6 +32,7 @@ Server-only `server/integrations.json` entries can protect individual sources/ac
 - S3 bucket: `zoolanding-config-payloads`
 - SSM Parameter Store SecureString for `credentialRef` values
 - API Gateway: `POST /api-proxy/read`, `POST /api-proxy/action`, `GET|POST /auth/runtime-config`, `POST /auth/provisioning-plan`, and `POST /auth/provisioning-executor`. The executor route must remain IAM-authorized.
+- Cognito public app-client APIs for optional custom auth forms: InitiateAuth, SignUp, ConfirmSignUp, ResendConfirmationCode, ForgotPassword, ConfirmForgotPassword, plus AdminAddUserToGroup for server-approved signup default groups.
 - PyJWT with crypto support for reusable JWT authorizer verification against JWKS
 
 ## Local Tests
@@ -116,6 +120,8 @@ The planned public app client callback URLs are `https://zoositioweb.com.mx/auth
 - Draft/browser payloads must not contain tokens, client secrets, private keys, or upstream URLs with embedded credentials.
 - Auth profile registries must not contain raw secrets, tokens, client secrets, private keys, passwords, credentials, or API keys. Social IdP credentials are represented by SSM/Secrets Manager secret refs only.
 - Public auth runtime config never includes social IdP secret refs or raw credentials.
+- Custom auth form endpoints reject unsupported browser fields instead of accepting tenant/group/user-pool policy from the client.
+- Custom signup may set tenant attributes and default groups only from the server-only profile `customAuth.signup` policy; password recovery uses only the profile public app client.
 - Provisioning plan requests accept only `domain` and `authProfileId`; secret-looking or policy-style browser/server payload fields are rejected instead of ignored.
 - Provisioning plans are server-only and plan-only; dry-run does not create Cognito, Google, Facebook, DynamoDB, S3, API Gateway, or IAM resources.
 - Provisioning executor requests accept only `domain`, `authProfileId`, `mode`, `planKey`, and `idempotencyKey`; `dry-run` is preview-only and `apply` remains disabled unless `AUTH_PROVISIONING_APPLY_ENABLED=true` is deployed with exact ARN, domain, and tenant guardrails.
