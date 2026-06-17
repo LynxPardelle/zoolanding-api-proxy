@@ -172,3 +172,12 @@
 - CloudFormation completed `UPDATE_COMPLETE`. API Gateway `yxp97qlog2` now has `DraftJwtRequestAuthorizer` with type `REQUEST`, identity source `Authorization`, `x-zoolanding-domain`, `x-zoolanding-auth-profile-id`, and TTL `0`.
 - Stack parameter `AuthProvisioningApplyEnabled` remained `false`. Runtime-config smoke for `zoositioweb.com.mx` returned `ok:true`, `auth.enabled:true`, issuer `https://cognito-idp.us-east-1.amazonaws.com/us-east-1_Pq5OCadbK`, and public client ID `16jb6ml9q5jdh6blj7f668fajp`.
 - Unsigned provisioning executor POST still returned `403 Missing Authentication Token`. Direct Lambda authorizer invoke with a fake `TOKEN` event returned a `Deny` policy and no function error.
+
+## 2026-06-17 02:02 CT - Auth Testing Environment Split
+
+- The API proxy now supports a separate SAM testing stack, `zoolanding-api-proxy-test`, with `ApiStageName=Test`, `AuthRuntimeEnvironment=test`, and CORS scoped to `https://test.zoolandingpage.com.mx`.
+- Production remains `zoolanding-api-proxy` with `ApiStageName=Prod` and `AuthRuntimeEnvironment=prod`.
+- Drafts that want one Cognito user pool for testing and production users can declare `environmentClaim`, for example `custom:zoolanding_env`, in the server-only auth profile. Custom signup writes that claim from the Lambda stack environment, never from browser input.
+- Signin, protected integrations, and `DraftJwtRequestAuthorizer` enforce `environmentClaim` when present, so a verified `prod` JWT is denied by the `test` stack and vice versa.
+- The Cognito executor can add the mutable custom environment attribute to an existing user pool through `AddCustomAttributes`; active profiles with `environmentClaim` now get a repair-only plan with `ensure-user-pool` plus `ensure-user-environment-attribute`, without social IdP preflight and without rewriting effective runtime auth state. Console-created users still need the attribute set or repaired before passing environment-scoped auth.
+- `zoolanding-api-proxy-test` was created, then updated, in `us-east-1`; stack output `ApiUrl` is `https://11zpm6wug2.execute-api.us-east-1.amazonaws.com/Test`, `AuthRuntimeEnvironment=test`, `AuthProvisioningApplyEnabled=false`, and `AuthProvisioningStateTableMode=existing`.

@@ -45,6 +45,7 @@ AUTH_PROVISIONING_STATE_TABLE_NAME = os.getenv("AUTH_PROVISIONING_STATE_TABLE_NA
 AUTH_PROVISIONING_APPLY_ENABLED = os.getenv("AUTH_PROVISIONING_APPLY_ENABLED", "false")
 AUTH_PROVISIONING_APPLY_ALLOWED_DOMAINS = os.getenv("AUTH_PROVISIONING_APPLY_ALLOWED_DOMAINS", "")
 AUTH_PROVISIONING_APPLY_ALLOWED_TENANTS = os.getenv("AUTH_PROVISIONING_APPLY_ALLOWED_TENANTS", "")
+AUTH_RUNTIME_ENVIRONMENT = os.getenv("AUTH_RUNTIME_ENVIRONMENT", "prod")
 _AUTH_REQUEST_ORIGIN = None
 _COGNITO_IDP_CLIENT = None
 _DYNAMODB_CLIENT = None
@@ -63,6 +64,7 @@ AUTH_PATHS = {
     "/auth/confirm-forgot-password",
 }
 AUTH_PROFILE_STATUSES = {"active", "planned", "provisioning", "suspended", "failed"}
+AUTH_RUNTIME_ENVIRONMENTS = {"dev", "test", "prod"}
 AUTH_PROVISIONING_PLAN_SCHEMA_VERSION = "2026-06-10.v1"
 AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION = "2026-06-10.executor.v1"
 TEST_PREVIEW_ORIGIN_HOST = "test.zoolandingpage.com.mx"
@@ -311,6 +313,7 @@ def validate_auth_registry(registry: Dict[str, Any]) -> None:
                     _validate_same_origin_path(str(profile.get(optional_path)), optional_path)
             if not _audiences(profile):
                 raise AuthRegistryError("Active auth profile requires an audience/clientId")
+            _environment_claim(profile)
             for callback_url in _string_list(profile.get("callbackUrls")):
                 _validate_https_url(callback_url, "callbackUrl")
             for logout_url in _string_list(profile.get("logoutUrls")):
@@ -498,10 +501,14 @@ def _custom_signup_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     user_pool_id = _profile_user_pool_id(profile)
     tenant_claim = str(profile.get("tenantClaim") or "custom:tenant_id").strip()
     tenant_id = str(profile.get("tenantId") or "").strip()
+    environment_claim = _environment_claim(profile)
+    runtime_environment = _runtime_environment()
 
     user_attributes = [{"Name": "email", "Value": email}]
     if signup_policy.get("setTenantClaim", True) is not False and tenant_claim and tenant_id:
         user_attributes.append({"Name": tenant_claim, "Value": tenant_id})
+    if signup_policy.get("setEnvironmentClaim", True) is not False and environment_claim:
+        user_attributes.append({"Name": environment_claim, "Value": runtime_environment})
 
     metadata = _custom_auth_client_metadata(domain, profile, language)
     try:
@@ -867,7 +874,6 @@ def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
     auth_profile_id = _profile_id(profile)
     status = _profile_status(profile)
     issuer = str(profile.get("issuer") or "").strip()
-    lifecycle = _plan_lifecycle(status)
     public_runtime_auth = _public_runtime_auth(profile, enabled=status == "active")
     social_identity_providers = _social_identity_providers(profile)
     config_hash = _provisioning_config_hash(
@@ -880,9 +886,11 @@ def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
         auth_profile_id=auth_profile_id,
         tenant_id=str(profile.get("tenantId") or "").strip(),
         status=status,
+        environment_claim=_environment_claim(profile),
         social_identity_providers=social_identity_providers,
         config_hash=config_hash,
     )
+    lifecycle = _plan_lifecycle(status, has_operations=bool(operations))
     plan_key = _stable_key("plan", AUTH_PROVISIONING_PLAN_SCHEMA_VERSION, config_hash)
     return {
         "mode": "plan-only",
@@ -916,6 +924,10 @@ def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
             "claim": str(profile.get("groupClaim") or "cognito:groups"),
             "allowed": _string_list(profile.get("allowedGroups")),
         },
+        "userEnvironment": {
+            "claim": _environment_claim(profile),
+            "allowed": sorted(AUTH_RUNTIME_ENVIRONMENTS),
+        },
         "socialIdentityProviders": social_identity_providers,
         "operations": operations,
         "expectedOutputs": {
@@ -929,11 +941,13 @@ def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
             "callbackUrls": _string_list(profile.get("callbackUrls")),
             "logoutUrls": _string_list(profile.get("logoutUrls")),
             "runtimeAuthEnabled": True,
+            "environmentClaim": _environment_claim(profile),
         },
         "jwtAuthorizer": {
             "audienceMode": "aud-or-client_id",
             "tenantClaim": str(profile.get("tenantClaim") or "custom:tenant_id"),
             "groupClaim": str(profile.get("groupClaim") or "cognito:groups"),
+            "environmentClaim": _environment_claim(profile),
         },
     }
 
@@ -989,6 +1003,10 @@ def _claims_allowed_for_profile(claims: Dict[str, Any], profile: Dict[str, Any])
         if str(claims.get(tenant_claim) or "") != tenant_id:
             return False
 
+    environment_claim = _environment_claim(profile)
+    if environment_claim and str(claims.get(environment_claim) or "") != _runtime_environment():
+        return False
+
     allowed_groups = set(_string_list(profile.get("allowedGroups")))
     if allowed_groups:
         group_claim = str(profile.get("groupClaim") or "cognito:groups")
@@ -1005,6 +1023,41 @@ def _claims_match_audience(claims: Dict[str, Any], audiences: list[str]) -> bool
     if client_id:
         actual.add(client_id)
     return bool(expected.intersection(actual))
+
+
+def _environment_claim(profile: Dict[str, Any]) -> str:
+    claim = str(profile.get("environmentClaim") or "").strip()
+    if not claim:
+        return ""
+    if CONTROL_OR_WHITESPACE_RE.search(claim) or not re.fullmatch(r"custom:[A-Za-z0-9_]{1,20}", claim):
+        raise AuthRegistryError("environmentClaim must be a Cognito custom claim")
+    return claim
+
+
+def _environment_attribute_name(claim: str) -> str:
+    normalized = str(claim or "").strip()
+    if normalized.startswith("custom:"):
+        normalized = normalized[7:]
+    if not normalized or CONTROL_OR_WHITESPACE_RE.search(normalized) or not re.fullmatch(r"[A-Za-z0-9_]{1,20}", normalized):
+        raise AuthRegistryError("environmentClaim must be a Cognito custom claim")
+    return normalized
+
+
+def _runtime_environment() -> str:
+    configured = str(os.getenv("AUTH_RUNTIME_ENVIRONMENT", AUTH_RUNTIME_ENVIRONMENT) or "").strip().lower()
+    aliases = {
+        "production": "prod",
+        "testing": "test",
+        "development": "dev",
+    }
+    configured = aliases.get(configured, configured)
+    if configured in AUTH_RUNTIME_ENVIRONMENTS:
+        return configured
+
+    origin_domain = normalize_domain(origin_hostname(_AUTH_REQUEST_ORIGIN))
+    if origin_domain == TEST_PREVIEW_ORIGIN_HOST:
+        return "test"
+    return "prod"
 
 
 def _provisioning_config_hash(
@@ -1039,8 +1092,12 @@ def _provisioning_config_hash(
             "claim": str(profile.get("groupClaim") or "cognito:groups").strip(),
             "allowed": sorted(_string_list(profile.get("allowedGroups"))),
         },
+        "userEnvironment": {
+            "claim": _environment_claim(profile),
+        },
         "jwtAuthorizer": {
             "tenantClaim": str(profile.get("tenantClaim") or "custom:tenant_id").strip(),
+            "environmentClaim": _environment_claim(profile),
         },
         "socialIdentityProviders": _hashable_social_identity_providers(social_identity_providers),
     }
@@ -1180,6 +1237,8 @@ def _custom_auth_client_metadata(domain: str, profile: Dict[str, Any], language:
         "domain": normalize_domain(domain),
         "authProfileId": _profile_id(profile),
     }
+    if _environment_claim(profile):
+        metadata["environment"] = _runtime_environment()
     if language:
         metadata["language"] = language
     return metadata
@@ -1374,7 +1433,11 @@ def _cognito_executor_apply(plan: Dict[str, Any], *, requested_idempotency_key: 
     idempotency_key = _executor_idempotency_key(plan, "apply", requested_idempotency_key)
     operations = [operation for operation in plan.get("operations", []) if isinstance(operation, dict)]
     operation_outputs = _load_existing_operation_outputs(plan, operations)
-    provider_credentials = _preflight_social_identity_provider_credentials(plan)
+    provider_credentials = (
+        _preflight_social_identity_provider_credentials(plan)
+        if _operations_configure_social_identity_providers(operations)
+        else {}
+    )
     applied_operations: list[Dict[str, Any]] = []
 
     for operation in operations:
@@ -1419,7 +1482,8 @@ def _cognito_executor_apply(plan: Dict[str, Any], *, requested_idempotency_key: 
                 error_type=type(exc).__name__,
             )
 
-    _write_effective_auth_state(plan, operation_outputs)
+    if _operations_activate_runtime(operations):
+        _write_effective_auth_state(plan, operation_outputs)
     return _executor_apply_response(
         plan,
         idempotency_key=idempotency_key,
@@ -1494,6 +1558,8 @@ def _execute_cognito_operation(
     operation_id = str(operation.get("operationId") or "")
     if operation_id == "ensure-user-pool":
         return _ensure_cognito_user_pool(plan, operation_outputs)
+    if operation_id == "ensure-user-environment-attribute":
+        return _ensure_cognito_user_environment_attribute(plan, operation_outputs)
     if operation_id == "ensure-hosted-ui-domain":
         return _ensure_cognito_hosted_ui_domain(plan, operation_outputs)
     if operation_id == "ensure-public-client":
@@ -1508,7 +1574,8 @@ def _execute_cognito_operation(
 
 
 def _ensure_cognito_user_pool(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> Dict[str, Any]:
-    existing_pool_id = str(operation_outputs.get("userPoolId") or "").strip()
+    expected_outputs = plan.get("expectedOutputs") if isinstance(plan.get("expectedOutputs"), dict) else {}
+    existing_pool_id = str(operation_outputs.get("userPoolId") or expected_outputs.get("userPoolId") or "").strip()
     if existing_pool_id:
         _cognito_idp().describe_user_pool(UserPoolId=existing_pool_id)
         return {"userPoolId": existing_pool_id}
@@ -1539,6 +1606,7 @@ def _ensure_cognito_user_pool(plan: Dict[str, Any], operation_outputs: Dict[str,
                 "Required": False,
                 "StringAttributeConstraints": {"MinLength": "1", "MaxLength": "80"},
             },
+            *_cognito_environment_schema_attributes(plan),
         ],
         Policies={
             "PasswordPolicy": {
@@ -1558,6 +1626,69 @@ def _ensure_cognito_user_pool(plan: Dict[str, Any], operation_outputs: Dict[str,
         "userPoolId": user_pool_id,
         "issuer": f"https://cognito-idp.{_aws_region()}.amazonaws.com/{user_pool_id}",
     }
+
+
+def _operations_activate_runtime(operations: list[Dict[str, Any]]) -> bool:
+    return any(
+        str(operation.get("operationId") or "") == "finalize-runtime-activation"
+        for operation in operations
+        if isinstance(operation, dict)
+    )
+
+
+def _operations_configure_social_identity_providers(operations: list[Dict[str, Any]]) -> bool:
+    return any(
+        str(operation.get("operationId") or "") == "ensure-social-identity-providers"
+        for operation in operations
+        if isinstance(operation, dict)
+    )
+
+
+def _ensure_cognito_user_environment_attribute(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> Dict[str, Any]:
+    claim = _plan_environment_claim(plan)
+    if not claim:
+        return {}
+
+    user_pool_id = _required_output(operation_outputs, "userPoolId")
+    attribute_name = _environment_attribute_name(claim)
+    response = _cognito_idp().describe_user_pool(UserPoolId=user_pool_id)
+    schema = ((response.get("UserPool") or {}).get("SchemaAttributes") or [])
+    existing_names = {
+        str(attribute.get("Name") or "").strip()
+        for attribute in schema
+        if isinstance(attribute, dict)
+    }
+    if attribute_name in existing_names or f"custom:{attribute_name}" in existing_names:
+        return {"userEnvironmentAttribute": attribute_name}
+
+    _cognito_idp().add_custom_attributes(
+        UserPoolId=user_pool_id,
+        CustomAttributes=_cognito_environment_schema_attributes(plan),
+    )
+    return {"userEnvironmentAttribute": attribute_name}
+
+
+def _plan_environment_claim(plan: Dict[str, Any]) -> str:
+    user_environment = plan.get("userEnvironment") if isinstance(plan.get("userEnvironment"), dict) else {}
+    claim = str(user_environment.get("claim") or "").strip()
+    if not claim:
+        return ""
+    return _environment_claim({"environmentClaim": claim})
+
+
+def _cognito_environment_schema_attributes(plan: Dict[str, Any]) -> list[Dict[str, Any]]:
+    claim = _plan_environment_claim(plan)
+    if not claim:
+        return []
+    return [
+        {
+            "Name": _environment_attribute_name(claim),
+            "AttributeDataType": "String",
+            "Mutable": True,
+            "Required": False,
+            "StringAttributeConstraints": {"MinLength": "3", "MaxLength": "16"},
+        }
+    ]
 
 
 def _ensure_cognito_hosted_ui_domain(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> Dict[str, Any]:
@@ -2528,6 +2659,7 @@ def _validate_provisioning_profile(profile: Dict[str, Any]) -> None:
     _validate_same_origin_path(str(profile.get("loginPath") or "/login"), "loginPath")
     if status == "active" and not _audiences(profile):
         raise AuthRegistryError("Provisioning plan requires an audience/clientId")
+    _environment_claim(profile)
     for callback_url in _string_list(profile.get("callbackUrls")):
         _validate_https_url(callback_url, "callbackUrl")
     for logout_url in _string_list(profile.get("logoutUrls")):
@@ -2539,7 +2671,7 @@ def _validate_provisioning_profile(profile: Dict[str, Any]) -> None:
     _validate_social_identity_provider_metadata(profile)
 
 
-def _plan_lifecycle(status: str) -> Dict[str, Any]:
+def _plan_lifecycle(status: str, *, has_operations: bool = False) -> Dict[str, Any]:
     if status == "planned":
         return {
             "currentStatus": status,
@@ -2557,6 +2689,14 @@ def _plan_lifecycle(status: str) -> Dict[str, Any]:
             "expectedFinalStatus": "active",
         }
     if status == "active":
+        if has_operations:
+            return {
+                "currentStatus": status,
+                "runtimeAuthEnabled": True,
+                "executorAction": "repair-active-profile",
+                "expectedNextStatus": "active",
+                "expectedFinalStatus": "active",
+            }
         return {
             "currentStatus": status,
             "runtimeAuthEnabled": True,
@@ -2677,10 +2817,35 @@ def _provisioning_operations(
     auth_profile_id: str,
     tenant_id: str,
     status: str,
+    environment_claim: str,
     social_identity_providers: list[Dict[str, Any]],
     config_hash: str,
 ) -> list[Dict[str, Any]]:
     if status == "active":
+        if environment_claim:
+            return [
+                _plan_operation(
+                    domain=domain,
+                    auth_profile_id=auth_profile_id,
+                    tenant_id=tenant_id,
+                    status=status,
+                    config_hash=config_hash,
+                    operation_id="ensure-user-pool",
+                    stage="identity-core",
+                    expected_status_after_completion="active",
+                ),
+                _plan_operation(
+                    domain=domain,
+                    auth_profile_id=auth_profile_id,
+                    tenant_id=tenant_id,
+                    status=status,
+                    config_hash=config_hash,
+                    operation_id="ensure-user-environment-attribute",
+                    stage="user-environment",
+                    expected_status_after_completion="active",
+                    depends_on=["ensure-user-pool"],
+                ),
+            ]
         return []
     if status in {"suspended", "failed"}:
         return []
@@ -2696,6 +2861,27 @@ def _provisioning_operations(
             stage="identity-core",
             expected_status_after_completion="provisioning",
         ),
+    ]
+    if environment_claim:
+        operations.append(
+            _plan_operation(
+                domain=domain,
+                auth_profile_id=auth_profile_id,
+                tenant_id=tenant_id,
+                status=status,
+                config_hash=config_hash,
+                operation_id="ensure-user-environment-attribute",
+                stage="user-environment",
+                expected_status_after_completion="provisioning",
+                depends_on=["ensure-user-pool"],
+            )
+        )
+
+    public_client_dependencies = ["ensure-user-pool"]
+    if environment_claim:
+        public_client_dependencies.append("ensure-user-environment-attribute")
+
+    operations.extend([
         _plan_operation(
             domain=domain,
             auth_profile_id=auth_profile_id,
@@ -2716,7 +2902,7 @@ def _provisioning_operations(
             operation_id="ensure-public-client",
             stage="public-client",
             expected_status_after_completion="provisioning",
-            depends_on=["ensure-user-pool"],
+            depends_on=public_client_dependencies,
         ),
         _plan_operation(
             domain=domain,
@@ -2729,7 +2915,7 @@ def _provisioning_operations(
             expected_status_after_completion="provisioning",
             depends_on=["ensure-public-client"],
         ),
-    ]
+    ])
     if social_identity_providers:
         operations.append(
             _plan_operation(

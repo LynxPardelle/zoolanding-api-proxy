@@ -15,7 +15,7 @@ The browser sends only `domain`, optional `pageId`, `sourceId` or `actionId`, an
 
 Auth profiles are resolved from the published server-only file `server/auth-profile-registry.json`. The runtime auth endpoint accepts only `domain` and `authProfileId`, enforces that the browser `Origin` belongs to the requested domain or to a managed alias for that domain, then returns the same public `runtime.auth` shape validated by the Angular app. Requests from the shared testing host or a configured environment alias resolve `publishedEnvironments.test` instead of production `published`, so testing can exercise draft auth changes without changing production auth policy. Active profiles return `enabled: true`; planned, provisioning, suspended, and failed profiles return the same secret-free public metadata with `enabled: false`. The provisioning endpoint is denied by default, accepts only `domain` and `authProfileId`, and returns only a server-only, plan-only contract when the caller's signed IAM role is explicitly allowlisted by `AUTH_PROVISIONING_ALLOWED_ROLE_NAMES` or `AUTH_PROVISIONING_ALLOWED_ROLE_ARNS`.
 
-Custom auth form endpoints are optional per auth profile. They require the server-only profile to be active and to enable the matching `customAuth` policy before calling Cognito. Browser requests may send only public form inputs such as email, password, confirmation code, language, `domain`, and `authProfileId`; tenant claims, default groups, user pool IDs, and billing boundaries are resolved from the server-only profile. The signup endpoint can set the configured tenant claim and add only server-approved default groups from `allowedGroups`. Signin uses Cognito `USER_PASSWORD_AUTH` and returns only sanitized public session metadata after JWT issuer/audience/tenant/group validation; it does not return ID, access, or refresh tokens. Responses return sanitized statuses and code-delivery metadata only.
+Custom auth form endpoints are optional per auth profile. They require the server-only profile to be active and to enable the matching `customAuth` policy before calling Cognito. Browser requests may send only public form inputs such as email, password, confirmation code, language, `domain`, and `authProfileId`; tenant claims, default groups, user pool IDs, billing boundaries, and runtime environment are resolved from the server-only profile and Lambda stack. The signup endpoint can set the configured tenant claim, optionally set the configured environment claim such as `custom:zoolanding_env`, and add only server-approved default groups from `allowedGroups`. Signin uses Cognito `USER_PASSWORD_AUTH` and returns only sanitized public session metadata after JWT issuer/audience/tenant/environment/group validation; it does not return ID, access, or refresh tokens. Responses return sanitized statuses and code-delivery metadata only.
 
 Provisioning plans are deterministic and versioned. The response includes a stable `planVersion`, `planKey`, sanitized `configHash`, lifecycle status, runtime public-client shape, hosted UI data, expected post-activation outputs, normalized social IdP references, and per-operation `operationKey` plus `idempotencyKey` values for the executor. `planKey` and operation idempotency are bound to the sanitized desired config, so callback URLs, logout URLs, groups, hosted UI config, scopes, and social provider reference changes produce a new plan. `planned` and `provisioning` return resumable operations; `active` returns an explicit noop plan; `suspended` and `failed` return explicit manual-review plans. No raw social credentials, secret values, tokens, or browser-supplied policy fields are accepted or returned.
 
@@ -25,7 +25,7 @@ Parameterized read sources can use server-owned `urlTemplate` values, for exampl
 
 Server-only `server/integrations.json` entries can protect individual sources/actions with an `access` block. `access` verifies the browser JWT against the server-only auth profile registry before the proxy calls upstream. Existing integration `auth` blocks remain reserved for upstream API credentials.
 
-The SAM stack also publishes `DraftJwtRequestAuthorizer`, a reusable API Gateway Lambda authorizer for future protected endpoints. It is intentionally configured as a `REQUEST` authorizer so API Gateway sends `Authorization`, `x-zoolanding-domain`, and `x-zoolanding-auth-profile-id` together. Its cache TTL is `0` to avoid cross-domain or cross-profile authorization reuse until a tenant-safe cache key is designed. Existing public endpoints do not use it by default.
+The SAM stack also publishes `DraftJwtRequestAuthorizer`, a reusable API Gateway Lambda authorizer for future protected endpoints. It is intentionally configured as a `REQUEST` authorizer so API Gateway sends `Authorization`, `x-zoolanding-domain`, and `x-zoolanding-auth-profile-id` together. Its cache TTL is `0` to avoid cross-domain, cross-profile, or cross-environment authorization reuse until a tenant-safe cache key is designed. Existing public endpoints do not use it by default.
 
 ## AWS Dependencies
 
@@ -35,6 +35,7 @@ The SAM stack also publishes `DraftJwtRequestAuthorizer`, a reusable API Gateway
 - SSM Parameter Store SecureString for `credentialRef` values
 - API Gateway: `POST /api-proxy/read`, `POST /api-proxy/action`, `GET|POST /auth/runtime-config`, `POST /auth/provisioning-plan`, `POST /auth/provisioning-executor`, and the reusable `DraftJwtRequestAuthorizer`. The executor route must remain IAM-authorized.
 - Cognito public app-client APIs for optional custom auth forms: InitiateAuth, SignUp, ConfirmSignUp, ResendConfirmationCode, ForgotPassword, ConfirmForgotPassword, plus AdminAddUserToGroup for server-approved signup default groups.
+- Cognito custom user attribute `custom:zoolanding_env` or a profile-specific equivalent when a draft shares one user pool across testing and production users.
 - PyJWT with crypto support for reusable JWT authorizer verification against JWKS
 
 ## Local Tests
@@ -74,7 +75,14 @@ sam build --no-cached
 sam deploy
 ```
 
-The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy`, and the platform production/testing browser origins. Localhost and 127.0.0.1 origins are accepted by the Lambda for local QA only. Published draft domains are accepted dynamically from the config registry, so adding a new draft domain does not require editing the API Gateway/Lambda CORS parameter.
+Deploy the non-production Lambda stack with the `test` SAM environment. It uses the same config registry and provisioning state table, but runs with `ApiStageName=Test`, `AuthRuntimeEnvironment=test`, and CORS restricted to `https://test.zoolandingpage.com.mx`:
+
+```bash
+sam build --no-cached
+sam deploy --config-env test
+```
+
+The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy` for production and `zoolanding-api-proxy-test` for testing. Localhost and 127.0.0.1 origins are accepted by the Lambda for local QA only. Published draft domains are accepted dynamically from the config registry, so adding a new draft domain does not require editing the API Gateway/Lambda CORS parameter.
 
 ## Credential Placeholder Workflow
 
@@ -123,7 +131,8 @@ The planned public app client callback URLs are `https://zoositioweb.com.mx/auth
 - Auth profile registries must not contain raw secrets, tokens, client secrets, private keys, passwords, credentials, or API keys. Social IdP credentials are represented by SSM/Secrets Manager secret refs only.
 - Public auth runtime config never includes social IdP secret refs or raw credentials.
 - Custom auth form endpoints reject unsupported browser fields instead of accepting tenant/group/user-pool policy from the client.
-- Custom signup may set tenant attributes and default groups only from the server-only profile `customAuth.signup` policy; password recovery uses only the profile public app client.
+- Custom signup may set tenant attributes, environment attributes, and default groups only from the server-only profile `customAuth.signup` policy plus the Lambda stack environment; password recovery uses only the profile public app client.
+- When a profile declares `environmentClaim`, signin, protected integrations, and the reusable JWT authorizer require the verified JWT claim to match the deployed `AUTH_RUNTIME_ENVIRONMENT`. This allows one Cognito user pool to hold testing and production users for a draft while preventing cross-environment access.
 - Provisioning plan requests accept only `domain` and `authProfileId`; secret-looking or policy-style browser/server payload fields are rejected instead of ignored.
 - Provisioning plans are server-only and plan-only; dry-run does not create Cognito, Google, Facebook, DynamoDB, S3, API Gateway, or IAM resources.
 - Provisioning executor requests accept only `domain`, `authProfileId`, `mode`, `planKey`, and `idempotencyKey`; `dry-run` is preview-only and `apply` remains disabled unless `AUTH_PROVISIONING_APPLY_ENABLED=true` is deployed with exact ARN, domain, and tenant guardrails.

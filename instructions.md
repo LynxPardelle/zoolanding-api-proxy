@@ -232,6 +232,7 @@ Published drafts can include `server/auth-profile-registry.json` in the same pri
       "logoutUrls": ["https://music.lynxpardelle.com/logout"],
       "scopes": ["openid", "email", "profile"],
       "tenantClaim": "custom:tenant_id",
+      "environmentClaim": "custom:zoolanding_env",
       "groupClaim": "cognito:groups",
       "allowedGroups": ["Editors"],
       "socialIdpSecretRefs": {
@@ -245,9 +246,11 @@ Published drafts can include `server/auth-profile-registry.json` in the same pri
 
 Raw secrets, tokens, client secrets, private keys, passwords, credentials, and API keys are rejected in the registry. Social IdP setup uses secret refs only, and those refs must look like SSM/Secrets Manager references such as `/zoolanding/auth/tenant-a/staff/google` or AWS SSM/Secrets Manager ARNs. Active profiles must include `tenantId`, use absolute HTTPS `issuer` and `hostedUiDomain` values, same-origin auth paths that start with `/`, and HTTPS callback/logout URLs.
 
+`environmentClaim` is optional and must be a Cognito custom claim such as `custom:zoolanding_env`. When present, custom signup writes the value from the deployed Lambda stack environment (`dev`, `test`, or `prod`) instead of accepting it from the browser. Signin, protected integrations, and the reusable JWT authorizer require the verified JWT to contain that same environment value. This supports a shared Cognito user pool for one draft's testing and production users while keeping cross-environment access blocked; console-created users must have the mutable custom attribute set or repaired before they can pass environment-scoped auth.
+
 Structured social IdPs may also use a server-only `socialIdentityProviders` list. Each entry may declare `providerId`, `providerType` (`google`, `facebook`, `oidc`, or another executor-known type), optional public OIDC metadata such as `issuer`, `discoveryUrl`, `authorizeUrl`, `tokenUrl`, `userInfoUrl`, and `jwksUrl`, plus secret references such as `clientIdRef`, `clientSecretRef`, `providerSecretRef`, or nested `secretRefs`. Secret-looking raw values are still rejected.
 
-The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` and declared in SAM as `DraftJwtRequestAuthorizer` for future protected APIs. It verifies RS256 tokens through JWKS, keeps the full Cognito issuer path when building `/.well-known/jwks.json`, accepts either `aud` or Cognito access-token `client_id`, and enforces tenant/group policy from the server-only profile. It denies explicit `TOKEN` authorizer events because they cannot safely carry the draft domain and auth profile contract.
+The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` and declared in SAM as `DraftJwtRequestAuthorizer` for future protected APIs. It verifies RS256 tokens through JWKS, keeps the full Cognito issuer path when building `/.well-known/jwks.json`, accepts either `aud` or Cognito access-token `client_id`, and enforces tenant/environment/group policy from the server-only profile. It denies explicit `TOKEN` authorizer events because they cannot safely carry the draft domain and auth profile contract.
 
 ## Acceptance Criteria
 
