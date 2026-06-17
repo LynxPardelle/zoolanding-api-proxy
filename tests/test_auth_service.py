@@ -456,6 +456,12 @@ class TestAuthServiceCustomAuthForms(unittest.TestCase):
 
         auth.validate_auth_registry(registry)
 
+    def test_registry_validation_accepts_allowed_token_uses_policy_key(self):
+        registry = self.custom_auth_registry()
+        registry["profiles"][0]["allowedTokenUses"] = ["id", "access"]
+
+        auth.validate_auth_registry(registry)
+
     def fake_aws(self):
         reset_auth_clients()
         cognito = FakeCognitoClient()

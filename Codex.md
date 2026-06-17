@@ -189,3 +189,7 @@
 - JWT authorizer policy requires a subject and an allowed Cognito `token_use`; profiles can narrow accepted values through server-only `allowedTokenUses`, with `id` and `access` as the default contract.
 - The Cognito executor can add the mutable custom environment attribute to an existing user pool through `AddCustomAttributes`; active profiles with `environmentClaim` now get a repair-only plan with `ensure-user-pool` plus `ensure-user-environment-attribute`, without social IdP preflight and without rewriting effective runtime auth state. Console-created users still need the attribute set or repaired before passing environment-scoped auth.
 - `zoolanding-api-proxy-test` was created, then updated, in `us-east-1`; stack output `ApiUrl` is `https://11zpm6wug2.execute-api.us-east-1.amazonaws.com/Test`, `AuthRuntimeEnvironment=test`, `AuthProvisioningApplyEnabled=false`, and `AuthProvisioningStateTableMode=existing`.
+
+## 2026-06-17 CT - Auth Registry Token Policy Metadata
+
+- `allowedTokenUses` is server-only authorization policy metadata, not token material. The auth registry raw-secret scanner must allow that exact key while still rejecting raw token/secret/password/client-secret fields and values.

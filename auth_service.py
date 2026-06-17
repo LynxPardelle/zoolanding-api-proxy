@@ -108,6 +108,7 @@ SAFE_PUBLIC_AUTH_METADATA_KEYS = {
     "tokenEndpointUrl",
 }
 SAFE_AUTH_POLICY_KEYS = {
+    "allowedTokenUses",
     "passwordRecovery",
 }
 
