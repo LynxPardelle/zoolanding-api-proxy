@@ -25,13 +25,15 @@ Parameterized read sources can use server-owned `urlTemplate` values, for exampl
 
 Server-only `server/integrations.json` entries can protect individual sources/actions with an `access` block. `access` verifies the browser JWT against the server-only auth profile registry before the proxy calls upstream. Existing integration `auth` blocks remain reserved for upstream API credentials.
 
+The SAM stack also publishes `DraftJwtRequestAuthorizer`, a reusable API Gateway Lambda authorizer for future protected endpoints. It is intentionally configured as a `REQUEST` authorizer so API Gateway sends `Authorization`, `x-zoolanding-domain`, and `x-zoolanding-auth-profile-id` together. Its cache TTL is `0` to avoid cross-domain or cross-profile authorization reuse until a tenant-safe cache key is designed. Existing public endpoints do not use it by default.
+
 ## AWS Dependencies
 
 - DynamoDB table: `zoolanding-config-registry`
 - DynamoDB table: `zoolanding-auth-provisioning-state` for provisioning operation state and effective runtime activation state
 - S3 bucket: `zoolanding-config-payloads`
 - SSM Parameter Store SecureString for `credentialRef` values
-- API Gateway: `POST /api-proxy/read`, `POST /api-proxy/action`, `GET|POST /auth/runtime-config`, `POST /auth/provisioning-plan`, and `POST /auth/provisioning-executor`. The executor route must remain IAM-authorized.
+- API Gateway: `POST /api-proxy/read`, `POST /api-proxy/action`, `GET|POST /auth/runtime-config`, `POST /auth/provisioning-plan`, `POST /auth/provisioning-executor`, and the reusable `DraftJwtRequestAuthorizer`. The executor route must remain IAM-authorized.
 - Cognito public app-client APIs for optional custom auth forms: InitiateAuth, SignUp, ConfirmSignUp, ResendConfirmationCode, ForgotPassword, ConfirmForgotPassword, plus AdminAddUserToGroup for server-approved signup default groups.
 - PyJWT with crypto support for reusable JWT authorizer verification against JWKS
 
@@ -126,7 +128,7 @@ The planned public app client callback URLs are `https://zoositioweb.com.mx/auth
 - Provisioning plans are server-only and plan-only; dry-run does not create Cognito, Google, Facebook, DynamoDB, S3, API Gateway, or IAM resources.
 - Provisioning executor requests accept only `domain`, `authProfileId`, `mode`, `planKey`, and `idempotencyKey`; `dry-run` is preview-only and `apply` remains disabled unless `AUTH_PROVISIONING_APPLY_ENABLED=true` is deployed with exact ARN, domain, and tenant guardrails.
 - Apply resolves social IdP credentials only from scoped `/zoolanding/auth/{tenantId}/...` SSM/Secrets Manager references, rejects placeholders, performs preflight before mutation, and never returns raw secret refs or secret values.
-- JWT authorization verifies RS256 tokens through JWKS, validates issuer, accepts either `aud` or Cognito access-token `client_id`, and then enforces tenant/group policy from the server-only profile.
+- JWT authorization verifies RS256 tokens through JWKS, validates issuer, accepts either `aud` or Cognito access-token `client_id`, and then enforces tenant/group policy from the server-only profile. API Gateway wiring must use the declared `REQUEST` authorizer shape, not `TOKEN`, because the authorizer requires domain and auth profile headers.
 - Protected integrations use server-only `access.required`, `access.authProfileId`, and optional `access.allowedGroups`; invalid or missing user JWTs return a generic `Unauthorized` response before any upstream call.
 - Server-only integrations may configure safe static request headers through `headers`. Static `authorization`, `cookie`, `set-cookie`, and `x-api-key` headers are rejected so credentials keep flowing through `auth` and managed credential storage.
 - Supported auth types are `bearer`, `api-key-header`, and `oauth2-client-credentials`. The OAuth2 client-credentials flow reads `clientId` and `clientSecret` fields from the configured secret by default, exchanges them at the policy-controlled `auth.tokenUrl`, and sends only the resulting bearer token upstream.

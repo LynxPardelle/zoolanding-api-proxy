@@ -675,6 +675,37 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
             ),
         )
 
+    def test_api_gateway_declares_jwt_request_authorizer_without_cross_tenant_cache(self):
+        with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
+            template = template_file.read()
+
+        api = template_resource_block(template, "ApiProxyApi")
+
+        self.assertIn("DraftJwtRequestAuthorizer:", api)
+        self.assertIn("FunctionPayloadType: REQUEST", api)
+        self.assertRegex(
+            api,
+            re.compile(
+                r"FunctionArn:\s*"
+                r".*?Fn::GetAtt:\s*"
+                r".*?- AuthJwtAuthorizerFunction\s*"
+                r".*?- Arn",
+                re.S,
+            ),
+        )
+        self.assertRegex(
+            api,
+            re.compile(
+                r"Identity:\s*"
+                r".*?Headers:\s*"
+                r".*?- Authorization\s*"
+                r".*?- x-zoolanding-domain\s*"
+                r".*?- x-zoolanding-auth-profile-id\s*"
+                r".*?ReauthorizeEvery:\s*0",
+                re.S,
+            ),
+        )
+
     def test_provisioning_executor_post_route_requires_aws_iam_authorizer(self):
         with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
             template = template_file.read()
@@ -1874,10 +1905,13 @@ class TestAuthServiceAuthorizer(unittest.TestCase):
 
     def test_jwt_authorizer_allows_matching_tenant_audience_and_group_without_echoing_token(self):
         event = {
-            "type": "TOKEN",
-            "authorizationToken": "Bearer header.payload.signature",
+            "type": "REQUEST",
             "methodArn": "arn:aws:execute-api:us-east-1:123456789012:api/Prod/GET/blogs",
-            "headers": {"x-zoolanding-domain": "example.test", "x-zoolanding-auth-profile-id": "staff"},
+            "headers": {
+                "Authorization": "Bearer header.payload.signature",
+                "x-zoolanding-domain": "example.test",
+                "x-zoolanding-auth-profile-id": "staff",
+            },
         }
         verified_claims = {
             "sub": "user-123",
@@ -1901,10 +1935,13 @@ class TestAuthServiceAuthorizer(unittest.TestCase):
 
     def test_jwt_authorizer_denies_claims_without_required_group(self):
         event = {
-            "type": "TOKEN",
-            "authorizationToken": "Bearer header.payload.signature",
+            "type": "REQUEST",
             "methodArn": "arn:aws:execute-api:us-east-1:123456789012:api/Prod/GET/blogs",
-            "headers": {"x-zoolanding-domain": "example.test", "x-zoolanding-auth-profile-id": "staff"},
+            "headers": {
+                "Authorization": "Bearer header.payload.signature",
+                "x-zoolanding-domain": "example.test",
+                "x-zoolanding-auth-profile-id": "staff",
+            },
         }
         verified_claims = {
             "sub": "user-123",
@@ -1920,6 +1957,35 @@ class TestAuthServiceAuthorizer(unittest.TestCase):
 
         self.assertEqual(response["policyDocument"]["Statement"][0]["Effect"], "Deny")
         self.assertNotIn("header.payload.signature", json.dumps(response))
+
+    def test_jwt_authorizer_rejects_token_authorizer_shape_before_registry_lookup(self):
+        event = {
+            "type": "TOKEN",
+            "authorizationToken": "Bearer header.payload.signature",
+            "methodArn": "arn:aws:execute-api:us-east-1:123456789012:api/Prod/GET/blogs",
+            "domain": "example.test",
+            "authProfileId": "staff",
+        }
+
+        with patch.object(auth, "load_auth_registry_for_domain") as load_registry, \
+                patch.object(auth, "verify_jwt") as verify_jwt:
+            response = auth.jwt_authorizer_handler(event, Ctx())
+
+        self.assertEqual(response["policyDocument"]["Statement"][0]["Effect"], "Deny")
+        self.assertNotIn("header.payload.signature", json.dumps(response))
+        load_registry.assert_not_called()
+        verify_jwt.assert_not_called()
+
+    def test_jwt_authorizer_denies_missing_bearer_without_throwing(self):
+        event = {
+            "type": "REQUEST",
+            "methodArn": "arn:aws:execute-api:us-east-1:123456789012:api/Prod/GET/blogs",
+            "headers": {"x-zoolanding-domain": "example.test", "x-zoolanding-auth-profile-id": "staff"},
+        }
+
+        response = auth.jwt_authorizer_handler(event, Ctx())
+
+        self.assertEqual(response["policyDocument"]["Statement"][0]["Effect"], "Deny")
 
 
 class TestAuthRegistryAdapter(unittest.TestCase):

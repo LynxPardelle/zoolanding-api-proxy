@@ -174,6 +174,14 @@ Access options:
 - `access.allowedGroups` can further narrow access for a specific source/action beyond the profile's own group policy.
 - The user JWT is never forwarded upstream. Upstream credentials still use `credentialRef` plus the existing `auth` block.
 
+Future API Gateway routes that need direct JWT protection should use the SAM `DraftJwtRequestAuthorizer`, not a `TOKEN` authorizer. The request must carry:
+
+- `Authorization: Bearer <jwt>`
+- `x-zoolanding-domain: <canonical draft domain>`
+- `x-zoolanding-auth-profile-id: <profile id>`
+
+The authorizer TTL is `0` so an authorization decision cannot be reused across domains or auth profiles. Keep it at `0` unless a tenant-safe cache key has been explicitly designed and tested.
+
 Auth options:
 
 - `bearer`: reads `auth.secretField` from the Secrets Manager JSON object and sends `Authorization: Bearer <value>`.
@@ -239,7 +247,7 @@ Raw secrets, tokens, client secrets, private keys, passwords, credentials, and A
 
 Structured social IdPs may also use a server-only `socialIdentityProviders` list. Each entry may declare `providerId`, `providerType` (`google`, `facebook`, `oidc`, or another executor-known type), optional public OIDC metadata such as `issuer`, `discoveryUrl`, `authorizeUrl`, `tokenUrl`, `userInfoUrl`, and `jwksUrl`, plus secret references such as `clientIdRef`, `clientSecretRef`, `providerSecretRef`, or nested `secretRefs`. Secret-looking raw values are still rejected.
 
-The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for future protected APIs. It verifies RS256 tokens through JWKS, keeps the full Cognito issuer path when building `/.well-known/jwks.json`, accepts either `aud` or Cognito access-token `client_id`, and enforces tenant/group policy from the server-only profile.
+The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` and declared in SAM as `DraftJwtRequestAuthorizer` for future protected APIs. It verifies RS256 tokens through JWKS, keeps the full Cognito issuer path when building `/.well-known/jwks.json`, accepts either `aud` or Cognito access-token `client_id`, and enforces tenant/group policy from the server-only profile. It denies explicit `TOKEN` authorizer events because they cannot safely carry the draft domain and auth profile contract.
 
 ## Acceptance Criteria
 
@@ -249,7 +257,7 @@ The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for futur
 - Public auth runtime config rejects browser origins that do not belong to the requested domain or a proven managed alias for that domain.
 - Server-only provisioning plans are denied by default and expose stable operation/idempotency keys for the executor.
 - Server-only provisioning executor dry-run returns sanitized previews and audit keys without secret refs; apply remains closed unless explicitly enabled by deploy-time feature flag and allowlists.
-- The reusable JWT authorizer can protect future blogs, dashboards, uploads, and mutable actions using the same server-only registry policy.
+- The reusable JWT request authorizer can protect future blogs, dashboards, uploads, and mutable actions using the same server-only registry policy.
 - The browser cannot choose arbitrary upstream URLs.
 - The browser cannot send undeclared input fields.
 - Parameterized detail sources can resolve server-owned upstream URLs from allowlisted scalar input without exposing arbitrary URL control to the browser.
@@ -264,5 +272,5 @@ The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` for futur
 - This repo creates only placeholder Secrets Manager entries; it does not store, generate, or rotate real upstream credential values.
 - This repo does not deploy itself automatically.
 - This repo does not expose `server/integrations.json` through runtime-read.
-- This repo does not create Cognito user pools, app clients, domains, Google/Facebook IdPs, API Gateway authorizers, or IAM roles unless an approved deploy/provisioning step enables apply and provides the required allowlists and secrets.
+- This repo does not create Cognito user pools, app clients, domains, Google/Facebook IdPs, or extra auth IAM roles unless an approved deploy/provisioning step enables apply and provides the required allowlists and secrets. The SAM stack does publish the reusable API Gateway JWT request authorizer used by future protected routes.
 - Cognito apply is non-destructive in v1: it creates/updates required resources and records state, but it does not delete Cognito resources.
