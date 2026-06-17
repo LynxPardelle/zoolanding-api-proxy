@@ -159,3 +159,9 @@
 - These endpoints are disabled unless the resolved active server-only auth profile enables the matching `customAuth` policy. Browser payloads may carry only public form inputs; tenant claims, default groups, user-pool policy, and billing isolation are resolved from the private profile.
 - `ApiProxyFunction` now has only the Cognito self-service actions needed by custom forms plus `AdminAddUserToGroup` for server-approved signup default groups. Signin uses `InitiateAuth` and returns only sanitized public session metadata, not token material. Provisioning and destructive Cognito actions remain outside the public proxy boundary.
 - No deploy, AWS call, Cognito mutation, secret, token, or user creation was performed in this implementation pass.
+
+## 2026-06-17 01:21 CT - JWT Request Authorizer Contract
+
+- `DraftJwtRequestAuthorizer` is now the SAM-declared reusable API Gateway authorizer for future protected blogs, dashboards, uploads, and actions.
+- The authorizer must be configured as `REQUEST`, with identity headers `Authorization`, `x-zoolanding-domain`, and `x-zoolanding-auth-profile-id`. Explicit `TOKEN` authorizer events are denied before registry lookup because they cannot safely carry the draft domain/profile contract.
+- Authorizer caching is disabled with `ReauthorizeEvery: 0` to prevent authorization reuse across domains or auth profiles until a tenant-safe cache key is deliberately designed and tested.

@@ -381,8 +381,10 @@ def authorize_bearer_for_domain(
 
 def jwt_authorizer_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     method_arn = str(event.get("methodArn") or event.get("routeArn") or "*")
-    token = _bearer_token(event)
     try:
+        if str(event.get("type") or "").upper() == "TOKEN":
+            raise AuthJwtError("JWT authorizer requires REQUEST payload")
+        token = _bearer_token(event)
         domain = _authorizer_domain(event)
         auth_profile_id = _authorizer_profile_id(event)
         registry = load_auth_registry_for_domain(domain)

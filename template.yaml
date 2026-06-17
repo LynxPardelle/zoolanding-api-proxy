@@ -74,6 +74,20 @@ Resources:
     Type: AWS::Serverless::Api
     Properties:
       StageName: Prod
+      Auth:
+        Authorizers:
+          DraftJwtRequestAuthorizer:
+            FunctionArn:
+              Fn::GetAtt:
+                - AuthJwtAuthorizerFunction
+                - Arn
+            FunctionPayloadType: REQUEST
+            Identity:
+              Headers:
+                - Authorization
+                - x-zoolanding-domain
+                - x-zoolanding-auth-profile-id
+              ReauthorizeEvery: 0
 
   ApiProxyFunction:
     Type: AWS::Serverless::Function
@@ -488,3 +502,9 @@ Outputs:
     Description: Reusable JWT authorizer Lambda function name.
     Value:
       Ref: AuthJwtAuthorizerFunction
+  AuthJwtAuthorizerFunctionArn:
+    Description: Reusable JWT authorizer Lambda function ARN.
+    Value:
+      Fn::GetAtt:
+        - AuthJwtAuthorizerFunction
+        - Arn
