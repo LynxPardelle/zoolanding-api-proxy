@@ -155,7 +155,7 @@ Provision these resource families idempotently:
 
 ### Testing Environment Split
 
-Use a separate SAM stack for the testing Lambda/API Gateway surface. The checked-in `test` deploy profile targets `zoolanding-api-proxy-test`, stage `Test`, `AUTH_RUNTIME_ENVIRONMENT=test`, and CORS scoped to `https://test.zoolandingpage.com.mx`.
+Use a separate SAM stack for the testing Lambda/API Gateway surface. The checked-in `test` deploy profile targets `zoolanding-api-proxy-test`, the stable `/Prod` API Gateway stage, `AUTH_RUNTIME_ENVIRONMENT=test`, and CORS scoped to `https://test.zoolandingpage.com.mx`. The testing and production stacks intentionally share the stage path name because the production SAM-generated logical IDs depend on the literal `Prod` stage, but the stacks use different API IDs and Lambda environments.
 
 The production stack remains `zoolanding-api-proxy`, stage `Prod`, and `AUTH_RUNTIME_ENVIRONMENT=prod`. If a draft intentionally shares one Cognito user pool across testing and production, the server-only profile must declare an `environmentClaim` such as `custom:zoolanding_env`; custom signup writes that claim from the stack environment and JWT validation requires a matching claim before allowing signin metadata, protected integration access, or authorizer approval.
 

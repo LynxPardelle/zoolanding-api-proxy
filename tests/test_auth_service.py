@@ -808,10 +808,19 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
         test_deploy = config["test"]["deploy"]["parameters"]
 
         self.assertEqual(test_deploy["stack_name"], "zoolanding-api-proxy-test")
-        self.assertIn("ApiStageName=Test", test_deploy["parameter_overrides"])
+        self.assertIn("ApiStageName=Prod", test_deploy["parameter_overrides"])
         self.assertIn("AuthRuntimeEnvironment=test", test_deploy["parameter_overrides"])
         self.assertIn("AllowedCorsOrigins=https://test.zoolandingpage.com.mx", test_deploy["parameter_overrides"])
         self.assertIn("AuthProvisioningStateTableMode=existing", test_deploy["parameter_overrides"])
+
+    def test_template_keeps_sam_stage_literal_for_all_api_proxy_stacks(self):
+        with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
+            template = template_file.read()
+
+        api = template_resource_block(template, "ApiProxyApi")
+
+        self.assertIn("StageName: Prod", api)
+        self.assertNotIn("Ref: ApiStageName", api)
 
     def test_provisioning_plan_post_route_requires_aws_iam_authorizer(self):
         with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:

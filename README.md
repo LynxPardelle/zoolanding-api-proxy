@@ -75,14 +75,14 @@ sam build --no-cached
 sam deploy
 ```
 
-Deploy the non-production Lambda stack with the `test` SAM environment. It uses the same config registry and provisioning state table, but runs with `ApiStageName=Test`, `AuthRuntimeEnvironment=test`, and CORS restricted to `https://test.zoolandingpage.com.mx`:
+Deploy the non-production Lambda stack with the `test` SAM environment. It uses the same config registry and provisioning state table, but runs as its own stack/API ID with `AuthRuntimeEnvironment=test` and CORS restricted to `https://test.zoolandingpage.com.mx`. The API Gateway stage path remains `/Prod` in both stacks because SAM-generated logical IDs for the live production stack depend on the literal `Prod` stage name:
 
 ```bash
 sam build --no-cached
 sam deploy --config-env test
 ```
 
-The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy` for production and `zoolanding-api-proxy-test` for testing. Localhost and 127.0.0.1 origins are accepted by the Lambda for local QA only. Published draft domains are accepted dynamically from the config registry, so adding a new draft domain does not require editing the API Gateway/Lambda CORS parameter.
+The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy` for production and `zoolanding-api-proxy-test` for testing. Both expose a `/Prod` API Gateway stage, but they remain isolated by stack name, API ID, Lambda environment variables, CORS, and `AUTH_RUNTIME_ENVIRONMENT`. Localhost and 127.0.0.1 origins are accepted by the Lambda for local QA only. Published draft domains are accepted dynamically from the config registry, so adding a new draft domain does not require editing the API Gateway/Lambda CORS parameter.
 
 ## Credential Placeholder Workflow
 

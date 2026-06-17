@@ -193,3 +193,9 @@
 ## 2026-06-17 CT - Auth Registry Token Policy Metadata
 
 - `allowedTokenUses` is server-only authorization policy metadata, not token material. The auth registry raw-secret scanner must allow that exact key while still rejecting raw token/secret/password/client-secret fields and values.
+
+## 2026-06-17 16:55 CT - Testing API Proxy Stage Contract
+
+- The `zoolanding-api-proxy-test` stack remains the testing runtime with `AUTH_RUNTIME_ENVIRONMENT=test`, testing CORS, and its own API Gateway ID, but its deployed API Gateway stage path is `/Prod`.
+- Keep `AWS::Serverless::Api.StageName` literal `Prod` for all API proxy stacks unless the production stack is intentionally migrated. Parameterizing the stage changes SAM-generated logical IDs and can replace or conflict with the live production `ApiProxyApiProdStage`.
+- Angular testing auth endpoints must use `https://11zpm6wug2.execute-api.us-east-1.amazonaws.com/Prod`, not the historical `/Test` path.
