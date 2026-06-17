@@ -165,3 +165,10 @@
 - `DraftJwtRequestAuthorizer` is now the SAM-declared reusable API Gateway authorizer for future protected blogs, dashboards, uploads, and actions.
 - The authorizer must be configured as `REQUEST`, with identity headers `Authorization`, `x-zoolanding-domain`, and `x-zoolanding-auth-profile-id`. Explicit `TOKEN` authorizer events are denied before registry lookup because they cannot safely carry the draft domain/profile contract.
 - Authorizer caching is disabled with `ReauthorizeEvery: 0` to prevent authorization reuse across domains or auth profiles until a tenant-safe cache key is deliberately designed and tested.
+
+## 2026-06-17 01:28 CT - JWT Request Authorizer Production Deploy
+
+- PR #14 was merged to `main` as `f890874`, then deployed to the `zoolanding-api-proxy` SAM stack in `us-east-1` from a fresh `.aws-sam/build/template.yaml`.
+- CloudFormation completed `UPDATE_COMPLETE`. API Gateway `yxp97qlog2` now has `DraftJwtRequestAuthorizer` with type `REQUEST`, identity source `Authorization`, `x-zoolanding-domain`, `x-zoolanding-auth-profile-id`, and TTL `0`.
+- Stack parameter `AuthProvisioningApplyEnabled` remained `false`. Runtime-config smoke for `zoositioweb.com.mx` returned `ok:true`, `auth.enabled:true`, issuer `https://cognito-idp.us-east-1.amazonaws.com/us-east-1_Pq5OCadbK`, and public client ID `16jb6ml9q5jdh6blj7f668fajp`.
+- Unsigned provisioning executor POST still returned `403 Missing Authentication Token`. Direct Lambda authorizer invoke with a fake `TOKEN` event returned a `Deny` policy and no function error.
