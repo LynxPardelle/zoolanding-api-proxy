@@ -15,7 +15,7 @@ Parameters:
     Type: String
     Default: Prod
     AllowedPattern: '^[A-Za-z0-9_-]+$'
-    Description: API Gateway stage name for this stack.
+    Description: Reserved for output compatibility. The existing production stack keeps a literal Prod stage to preserve SAM-generated logical IDs.
   AuthRuntimeEnvironment:
     Type: String
     Default: prod
@@ -94,8 +94,9 @@ Resources:
   ApiProxyApi:
     Type: AWS::Serverless::Api
     Properties:
-      StageName:
-        Ref: ApiStageName
+      # Keep this literal for the existing production stack. Parameterizing it
+      # changes SAM-generated logical IDs and tries to replace the live Prod stage.
+      StageName: Prod
       Auth:
         Authorizers:
           DraftJwtRequestAuthorizer:
@@ -489,27 +490,27 @@ Outputs:
   ApiUrl:
     Description: API proxy base URL.
     Value:
-      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiStageName}
+      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod
   ReadEndpoint:
     Description: Runtime data source read endpoint URL.
     Value:
-      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiStageName}/api-proxy/read
+      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/api-proxy/read
   ActionEndpoint:
     Description: Runtime API action endpoint URL.
     Value:
-      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiStageName}/api-proxy/action
+      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/api-proxy/action
   AuthRuntimeConfigEndpoint:
     Description: Public runtime auth config endpoint URL.
     Value:
-      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiStageName}/auth/runtime-config
+      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/auth/runtime-config
   AuthProvisioningPlanEndpoint:
     Description: Server-only plan-only auth provisioning endpoint URL.
     Value:
-      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiStageName}/auth/provisioning-plan
+      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/auth/provisioning-plan
   AuthProvisioningExecutorEndpoint:
     Description: Server-only dry-run Cognito provisioning executor endpoint URL.
     Value:
-      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiStageName}/auth/provisioning-executor
+      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/auth/provisioning-executor
   AuthProvisioningExecutorFunctionName:
     Description: Server-only auth provisioning executor Lambda function name.
     Value:

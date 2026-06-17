@@ -9,3 +9,4 @@
 - Active profiles with `environmentClaim` now produce a repair-only executor plan for `ensure-user-pool` and `ensure-user-environment-attribute`; this lets existing pools be updated without re-running Hosted UI/client/social provisioning.
 - Repair-only applies skip social IdP secret preflight and do not rewrite effective runtime auth state unless the plan includes `finalize-runtime-activation`.
 - Deployed/updated `zoolanding-api-proxy-test` in `us-east-1`; the stack exposes `https://11zpm6wug2.execute-api.us-east-1.amazonaws.com/Test`, runs with `AuthRuntimeEnvironment=test`, and keeps `AuthProvisioningApplyEnabled=false`.
+- Production deploy preflight found that parameterizing `AWS::Serverless::Api.StageName` changes the SAM-generated API Gateway stage logical ID away from the existing `ApiProxyApiProdStage`; the production template keeps `StageName: Prod` literal to avoid replacing the live stage.
