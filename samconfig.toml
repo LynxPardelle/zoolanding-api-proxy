@@ -7,5 +7,15 @@ s3_prefix = "zoolanding-api-proxy"
 region = "us-east-1"
 confirm_changeset = false
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "ConfigTableName=zoolanding-config-registry ConfigPayloadsBucketName=zoolanding-config-payloads AllowedCorsOrigins=https://zoolandingpage.com.mx,https://test.zoolandingpage.com.mx SecretNamePrefix=zoolanding/api/ AuthRegistryFileName=auth-profile-registry.json AuthProvisioningAllowedRoleArns=arn:aws:iam::765932874577:user/ADMIN-AIM-CLI AuthProvisioningApplyEnabled=false AuthProvisioningApplyAllowedDomains=zoositioweb.com.mx AuthProvisioningApplyAllowedTenants=zoosite AuthProvisioningStateTableName=zoolanding-auth-provisioning-state AuthProvisioningSecretParameterPrefix=zoolanding/auth/ AuthProvisioningSecretNamePrefix=/zoolanding/auth/ LogLevel=INFO"
+parameter_overrides = "ConfigTableName=zoolanding-config-registry ConfigPayloadsBucketName=zoolanding-config-payloads ApiStageName=Prod AuthRuntimeEnvironment=prod AllowedCorsOrigins=https://zoolandingpage.com.mx,https://test.zoolandingpage.com.mx SecretNamePrefix=zoolanding/api/ AuthRegistryFileName=auth-profile-registry.json AuthProvisioningAllowedRoleArns=arn:aws:iam::765932874577:user/ADMIN-AIM-CLI AuthProvisioningApplyEnabled=false AuthProvisioningApplyAllowedDomains=zoositioweb.com.mx AuthProvisioningApplyAllowedTenants=zoosite AuthProvisioningStateTableName=zoolanding-auth-provisioning-state AuthProvisioningStateTableMode=create AuthProvisioningSecretParameterPrefix=zoolanding/auth/ AuthProvisioningSecretNamePrefix=/zoolanding/auth/ LogLevel=INFO"
+image_repositories = []
+
+[test.deploy.parameters]
+stack_name = "zoolanding-api-proxy-test"
+resolve_s3 = true
+s3_prefix = "zoolanding-api-proxy-test"
+region = "us-east-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "ConfigTableName=zoolanding-config-registry ConfigPayloadsBucketName=zoolanding-config-payloads ApiStageName=Test AuthRuntimeEnvironment=test AllowedCorsOrigins=https://test.zoolandingpage.com.mx SecretNamePrefix=zoolanding/api/ AuthRegistryFileName=auth-profile-registry.json AuthProvisioningAllowedRoleArns=arn:aws:iam::765932874577:user/ADMIN-AIM-CLI AuthProvisioningApplyEnabled=false AuthProvisioningApplyAllowedDomains=zoositioweb.com.mx AuthProvisioningApplyAllowedTenants=zoosite AuthProvisioningStateTableName=zoolanding-auth-provisioning-state AuthProvisioningStateTableMode=existing AuthProvisioningSecretParameterPrefix=zoolanding/auth/ AuthProvisioningSecretNamePrefix=/zoolanding/auth/ LogLevel=INFO"
 image_repositories = []

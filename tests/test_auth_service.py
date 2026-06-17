@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import sys
 from tempfile import TemporaryDirectory
+import tomllib
 import unittest
 import time
 from unittest.mock import patch
@@ -424,6 +425,7 @@ class TestAuthServiceCustomAuthForms(unittest.TestCase):
             "password": "StrongPassphrase123!",
             "language": "es",
             "tenantId": "evil-tenant",
+            "environment": "prod",
             "groups": ["Admins"],
         }, headers={"Origin": "https://example.test"})
 
@@ -476,6 +478,39 @@ class TestAuthServiceCustomAuthForms(unittest.TestCase):
         self.assertEqual(group_call["UserPoolId"], "us-east-1_pool")
         self.assertEqual(group_call["Username"], "new.user@example.test")
         self.assertEqual(group_call["GroupName"], "Editors")
+
+    def test_custom_signup_sets_environment_claim_from_stack_not_browser(self):
+        cognito, fake_boto3 = self.fake_aws()
+        registry = self.custom_auth_registry()
+        registry["profiles"][0]["environmentClaim"] = "custom:zoolanding_env"
+        clean_event = api_event("/auth/signup", {
+            "domain": "Example.Test",
+            "authProfileId": "staff",
+            "email": "New.User@Example.Test",
+            "password": "StrongPassphrase123!",
+            "language": "es",
+        }, headers={"Origin": "https://test.zoolandingpage.com.mx"})
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, {"AUTH_RUNTIME_ENVIRONMENT": "test"}):
+            response = auth.auth_lambda_handler(clean_event, Ctx())
+
+        body = payload(response)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertTrue(body["ok"])
+        sign_up = cognito.calls[0][1]
+        self.assertEqual(sign_up["UserAttributes"], [
+            {"Name": "email", "Value": "new.user@example.test"},
+            {"Name": "custom:tenant_id", "Value": "tenant-a"},
+            {"Name": "custom:zoolanding_env", "Value": "test"},
+        ])
+        self.assertEqual(sign_up["ClientMetadata"], {
+            "domain": "example.test",
+            "authProfileId": "staff",
+            "environment": "test",
+            "language": "es",
+        })
 
     def test_custom_signin_returns_public_session_without_token_material(self):
         cognito, fake_boto3 = self.fake_aws()
@@ -539,6 +574,38 @@ class TestAuthServiceCustomAuthForms(unittest.TestCase):
             "PASSWORD": "StrongPassphrase123!",
         })
         verify_jwt.assert_called_once()
+
+    def test_custom_signin_rejects_user_from_wrong_environment_when_claim_is_configured(self):
+        cognito, fake_boto3 = self.fake_aws()
+        registry = self.custom_auth_registry()
+        registry["profiles"][0]["environmentClaim"] = "custom:zoolanding_env"
+        clean_event = api_event("/auth/signin", {
+            "domain": "example.test",
+            "authProfileId": "staff",
+            "email": "Client@Example.Test",
+            "password": "StrongPassphrase123!",
+        }, headers={"Origin": "https://test.zoolandingpage.com.mx"})
+        verified_claims = {
+            "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+            "aud": "public-client-id",
+            "sub": "user-123",
+            "email": "client@example.test",
+            "custom:tenant_id": "tenant-a",
+            "custom:zoolanding_env": "prod",
+            "cognito:groups": ["Editors"],
+            "exp": 1999999999,
+        }
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.object(auth, "verify_jwt", return_value=verified_claims), \
+                patch.dict(os.environ, {"AUTH_RUNTIME_ENVIRONMENT": "test"}):
+            response = auth.auth_lambda_handler(clean_event, Ctx())
+
+        body = payload(response)
+        self.assertEqual(response["statusCode"], 400)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "Sign-in failed")
 
     def test_password_recovery_uses_profile_client_and_never_accepts_tenant_policy(self):
         cognito, fake_boto3 = self.fake_aws()
@@ -663,6 +730,34 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
         self.assertIn("cognito-idp:AdminAddUserToGroup", api_proxy)
         self.assertRegex(api_proxy, re.compile(r"arn:aws:cognito-idp:\$\{AWS::Region\}:\$\{AWS::AccountId\}:userpool/\*"))
 
+    def test_template_declares_runtime_environment_parameter_for_test_stack_split(self):
+        with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
+            template = template_file.read()
+
+        api_proxy = template_resource_block(template, "ApiProxyFunction")
+        executor = template_resource_block(template, "AuthProvisioningExecutorFunction")
+        authorizer = template_resource_block(template, "AuthJwtAuthorizerFunction")
+
+        self.assertRegex(
+            template,
+            re.compile(r"AuthRuntimeEnvironment:.*?AllowedValues:\s*\[dev,\s*test,\s*prod\]", re.S),
+        )
+        self.assertRegex(api_proxy, re.compile(r"AUTH_RUNTIME_ENVIRONMENT:\s*Ref:\s*AuthRuntimeEnvironment", re.S))
+        self.assertRegex(executor, re.compile(r"AUTH_RUNTIME_ENVIRONMENT:\s*Ref:\s*AuthRuntimeEnvironment", re.S))
+        self.assertRegex(authorizer, re.compile(r"AUTH_RUNTIME_ENVIRONMENT:\s*Ref:\s*AuthRuntimeEnvironment", re.S))
+
+    def test_samconfig_declares_test_stack_runtime_environment(self):
+        with open(os.path.join(PROJECT_ROOT, "samconfig.toml"), "rb") as config_file:
+            config = tomllib.load(config_file)
+
+        test_deploy = config["test"]["deploy"]["parameters"]
+
+        self.assertEqual(test_deploy["stack_name"], "zoolanding-api-proxy-test")
+        self.assertIn("ApiStageName=Test", test_deploy["parameter_overrides"])
+        self.assertIn("AuthRuntimeEnvironment=test", test_deploy["parameter_overrides"])
+        self.assertIn("AllowedCorsOrigins=https://test.zoolandingpage.com.mx", test_deploy["parameter_overrides"])
+        self.assertIn("AuthProvisioningStateTableMode=existing", test_deploy["parameter_overrides"])
+
     def test_provisioning_plan_post_route_requires_aws_iam_authorizer(self):
         with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
             template = template_file.read()
@@ -747,6 +842,7 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
         api_proxy = template_resource_block(template, "ApiProxyFunction")
         executor = template_resource_block(template, "AuthProvisioningExecutorFunction")
         required_executor_actions = {
+            "cognito-idp:AddCustomAttributes",
             "cognito-idp:CreateUserPool",
             "cognito-idp:CreateUserPoolClient",
             "cognito-idp:CreateUserPoolDomain",
@@ -1019,6 +1115,34 @@ class TestAuthServiceProvisioningPlan(unittest.TestCase):
         self.assertEqual(body["plan"]["lifecycle"]["executorAction"], "noop-already-active")
         self.assertEqual(body["plan"]["operations"], [])
 
+    def test_active_profile_with_environment_claim_returns_attribute_repair_plan(self):
+        registry = active_registry()
+        registry["profiles"][0]["environmentClaim"] = "custom:zoolanding_env"
+        registry["profiles"][0]["userPoolId"] = "us-east-1_EXISTING"
+        event = api_event(
+            "/auth/provisioning-plan",
+            {"domain": "example.test", "authProfileId": "staff"},
+            request_context={
+                "identity": {
+                    "userArn": "arn:aws:sts::123456789012:assumed-role/zoolanding-auth-planner/session"
+                }
+            },
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)["plan"]
+        self.assertEqual(response["statusCode"], 200)
+        self.assertTrue(body["runtimeAuth"]["currentEnabled"])
+        self.assertEqual(body["lifecycle"]["executorAction"], "repair-active-profile")
+        self.assertEqual(
+            [operation["operationId"] for operation in body["operations"]],
+            ["ensure-user-pool", "ensure-user-environment-attribute"],
+        )
+        self.assertEqual(body["expectedOutputs"]["userPoolId"], "us-east-1_EXISTING")
+
     def test_suspended_and_failed_statuses_return_manual_review_plan(self):
         for auth_profile_id in ("suspended", "failed"):
             event = api_event(
@@ -1080,6 +1204,7 @@ class FakeCognitoClient:
             "Name": kwargs["PoolName"],
             "Arn": arn,
             "Tags": dict(kwargs.get("UserPoolTags") or {}),
+            "SchemaAttributes": list(kwargs.get("Schema") or []),
         }
         return {"UserPool": {"Id": pool_id, "Name": kwargs["PoolName"], "Arn": arn}}
 
@@ -1090,8 +1215,23 @@ class FakeCognitoClient:
             "Name": "unknown",
             "Arn": f"arn:aws:cognito-idp:us-east-1:123456789012:userpool/{kwargs['UserPoolId']}",
             "Tags": {},
+            "SchemaAttributes": [],
         }
         return {"UserPool": {key: value for key, value in user_pool.items() if key != "Tags"}}
+
+    def add_custom_attributes(self, **kwargs):
+        self._record("add_custom_attributes", **kwargs)
+        user_pool = self.user_pools.setdefault(kwargs["UserPoolId"], {
+            "Id": kwargs["UserPoolId"],
+            "Name": "unknown",
+            "Arn": f"arn:aws:cognito-idp:us-east-1:123456789012:userpool/{kwargs['UserPoolId']}",
+            "Tags": {},
+            "SchemaAttributes": [],
+        })
+        schema = user_pool.setdefault("SchemaAttributes", [])
+        for attribute in kwargs.get("CustomAttributes") or []:
+            schema.append(dict(attribute))
+        return {}
 
     def list_user_pools(self, **kwargs):
         self._record("list_user_pools", **kwargs)
@@ -1431,6 +1571,27 @@ class TestAuthServiceProvisioningExecutor(unittest.TestCase):
         load_registry.assert_called_once_with("example.test")
         load_item.assert_not_called()
 
+    def test_provisioning_plan_includes_user_environment_attribute_when_profile_declares_claim(self):
+        registry = active_registry()
+        registry["profiles"][1]["environmentClaim"] = "custom:zoolanding_env"
+        event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "planned",
+            "mode": "dry-run",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        operation_ids = [operation["operationId"] for operation in body["executor"]["operations"]]
+        self.assertIn("ensure-user-environment-attribute", operation_ids)
+        self.assertLess(
+            operation_ids.index("ensure-user-pool"),
+            operation_ids.index("ensure-user-environment-attribute"),
+        )
+
     def test_executor_apply_fails_closed_by_default_without_aws_calls(self):
         event = self.trusted_event({
             "domain": "example.test",
@@ -1536,6 +1697,97 @@ class TestAuthServiceProvisioningExecutor(unittest.TestCase):
         self.assertNotIn("/zoolanding/auth", serialized)
         self.assertNotIn("google-client-secret-test", serialized)
         self.assertNotIn("facebook-client-secret-test", serialized)
+
+    def test_executor_apply_adds_environment_custom_attribute_to_existing_pool(self):
+        reset_auth_clients()
+        registry = active_registry()
+        registry["profiles"][1]["environmentClaim"] = "custom:zoolanding_env"
+        event, plan = self.apply_event(registry=registry)
+        cognito, dynamodb, ssm, fake_boto3 = self.fake_aws()
+        existing_pool_id = "us-east-1_EXISTING"
+        dynamodb.seed_operation(plan, "ensure-user-pool", {
+            "userPoolId": existing_pool_id,
+            "issuer": f"https://cognito-idp.us-east-1.amazonaws.com/{existing_pool_id}",
+        })
+        cognito.user_pools[existing_pool_id] = {
+            "Id": existing_pool_id,
+            "Name": "existing",
+            "Arn": f"arn:aws:cognito-idp:us-east-1:123456789012:userpool/{existing_pool_id}",
+            "Tags": {},
+            "SchemaAttributes": [
+                {"Name": "email", "Mutable": True, "Required": True, "AttributeDataType": "String"},
+                {"Name": "custom:tenant_id", "Mutable": True, "Required": False, "AttributeDataType": "String"},
+            ],
+        }
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        actions = [call[0] for call in cognito.calls]
+        operation_statuses = {item["operationId"]: item["status"] for item in body["executor"]["operations"]}
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(operation_statuses["ensure-user-environment-attribute"], "succeeded")
+        self.assertIn("add_custom_attributes", actions)
+        add_call = next(kwargs for name, kwargs in cognito.calls if name == "add_custom_attributes")
+        self.assertEqual(add_call["CustomAttributes"], [{
+            "Name": "zoolanding_env",
+            "AttributeDataType": "String",
+            "Mutable": True,
+            "Required": False,
+            "StringAttributeConstraints": {"MinLength": "3", "MaxLength": "16"},
+        }])
+        self.assertGreaterEqual(len([call for call in dynamodb.calls if call[0] == "put_item"]), 8)
+
+    def test_executor_apply_repairs_environment_attribute_on_active_profile_without_runtime_reactivation(self):
+        reset_auth_clients()
+        registry = active_registry()
+        active_profile = registry["profiles"][0]
+        active_profile["environmentClaim"] = "custom:zoolanding_env"
+        active_profile["userPoolId"] = "us-east-1_ACTIVE"
+        plan = auth._cognito_plan("example.test", active_profile)
+        event = self.trusted_event({
+            "domain": "example.test",
+            "authProfileId": "staff",
+            "mode": "apply",
+            "planKey": plan["planKey"],
+            "idempotencyKey": auth._executor_idempotency_key(plan, "apply", None),
+        })
+        cognito, dynamodb, ssm, fake_boto3 = self.fake_aws()
+        cognito.user_pools["us-east-1_ACTIVE"] = {
+            "Id": "us-east-1_ACTIVE",
+            "Name": "active",
+            "Arn": "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_ACTIVE",
+            "Tags": {},
+            "SchemaAttributes": [
+                {"Name": "email", "Mutable": True, "Required": True, "AttributeDataType": "String"},
+                {"Name": "custom:tenant_id", "Mutable": True, "Required": False, "AttributeDataType": "String"},
+            ],
+        }
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        actions = [call[0] for call in cognito.calls]
+        state_writes = [
+            kwargs
+            for name, kwargs in dynamodb.calls
+            if name == "put_item" and kwargs["Item"]["sk"]["S"] == "STATE"
+        ]
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["executor"]["executionStatus"], "applied")
+        self.assertEqual(
+            [operation["operationId"] for operation in body["executor"]["operations"]],
+            ["ensure-user-pool", "ensure-user-environment-attribute"],
+        )
+        self.assertIn("add_custom_attributes", actions)
+        self.assertEqual(ssm.calls, [])
+        self.assertEqual(state_writes, [])
 
     def test_executor_apply_fails_closed_before_social_idp_mutation_when_required_secret_refs_are_missing(self):
         reset_auth_clients()
@@ -1953,6 +2205,35 @@ class TestAuthServiceAuthorizer(unittest.TestCase):
 
         with patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
                 patch.object(auth, "verify_jwt", return_value=verified_claims):
+            response = auth.jwt_authorizer_handler(event, Ctx())
+
+        self.assertEqual(response["policyDocument"]["Statement"][0]["Effect"], "Deny")
+        self.assertNotIn("header.payload.signature", json.dumps(response))
+
+    def test_jwt_authorizer_denies_wrong_runtime_environment_when_profile_declares_claim(self):
+        event = {
+            "type": "REQUEST",
+            "methodArn": "arn:aws:execute-api:us-east-1:123456789012:api/Test/GET/blogs",
+            "headers": {
+                "Authorization": "Bearer header.payload.signature",
+                "x-zoolanding-domain": "example.test",
+                "x-zoolanding-auth-profile-id": "staff",
+            },
+        }
+        registry = active_registry()
+        registry["profiles"][0]["environmentClaim"] = "custom:zoolanding_env"
+        verified_claims = {
+            "sub": "user-123",
+            "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+            "client_id": "public-client-id",
+            "custom:tenant_id": "tenant-a",
+            "custom:zoolanding_env": "prod",
+            "cognito:groups": ["Editors"],
+        }
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.object(auth, "verify_jwt", return_value=verified_claims), \
+                patch.dict(os.environ, {"AUTH_RUNTIME_ENVIRONMENT": "test"}):
             response = auth.jwt_authorizer_handler(event, Ctx())
 
         self.assertEqual(response["policyDocument"]["Statement"][0]["Effect"], "Deny")

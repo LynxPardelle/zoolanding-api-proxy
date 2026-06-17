@@ -146,11 +146,18 @@ Create a User Pool per draft/client/auth profile when strong isolation is requir
 Provision these resource families idempotently:
 
 - User Pool: list by deterministic name, verify Zoolanding ownership tags, fail closed on foreign same-name resources, create only when no owned match exists.
+- Environment custom attribute: when a profile declares `environmentClaim`, ensure the mutable Cognito custom attribute exists in the user pool so testing and production users can share one pool while remaining scoped by `AUTH_RUNTIME_ENVIRONMENT`.
 - Public App Client: list by deterministic name within the reconciled pool, verify it is public, update settings, create only when no match exists.
 - User Pool Domain: describe by domain prefix before create and reject ownership conflicts.
 - Groups: list existing groups before creating missing groups.
 - Google, Facebook, and OIDC identity providers: describe provider before create/update.
 - App Client supported provider updates after IdPs exist.
+
+### Testing Environment Split
+
+Use a separate SAM stack for the testing Lambda/API Gateway surface. The checked-in `test` deploy profile targets `zoolanding-api-proxy-test`, stage `Test`, `AUTH_RUNTIME_ENVIRONMENT=test`, and CORS scoped to `https://test.zoolandingpage.com.mx`.
+
+The production stack remains `zoolanding-api-proxy`, stage `Prod`, and `AUTH_RUNTIME_ENVIRONMENT=prod`. If a draft intentionally shares one Cognito user pool across testing and production, the server-only profile must declare an `environmentClaim` such as `custom:zoolanding_env`; custom signup writes that claim from the stack environment and JWT validation requires a matching claim before allowing signin metadata, protected integration access, or authorizer approval.
 
 ### State, Idempotency, And Runtime Status
 

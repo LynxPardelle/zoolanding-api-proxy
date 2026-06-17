@@ -13,3 +13,4 @@ local.secrets.json
 .env
 .env.*
 !.env.example
+logs/*.log
