@@ -300,6 +300,7 @@ def validate_auth_registry(registry: Dict[str, Any]) -> None:
         if status not in AUTH_PROFILE_STATUSES:
             raise AuthRegistryError("Auth profile status is invalid")
         _validate_social_identity_provider_metadata(profile)
+        _validate_public_auth_service_metadata(profile)
         if status == "active":
             if not str(profile.get("tenantId") or "").strip():
                 raise AuthRegistryError("Active auth profile requires tenantId")
@@ -366,6 +367,7 @@ def authorize_bearer_for_domain(
     )
     if not _claims_allowed_for_profile(claims, profile):
         raise AuthJwtError()
+    principal_id = _claims_subject(claims)
 
     narrowed_groups = set(_string_list(allowed_groups))
     if narrowed_groups:
@@ -375,7 +377,7 @@ def authorize_bearer_for_domain(
             raise AuthJwtError()
 
     return {
-        "principalId": str(claims.get("sub") or claims.get("username") or "authenticated"),
+        "principalId": principal_id,
         "domain": normalize_domain(domain),
         "authProfileId": _profile_id(profile),
         "tenantId": str(profile.get("tenantId") or ""),
@@ -406,7 +408,7 @@ def jwt_authorizer_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any
         if not _claims_allowed_for_profile(claims, profile):
             raise AuthJwtError()
 
-        principal_id = str(claims.get("sub") or claims.get("username") or "authenticated")
+        principal_id = _claims_subject(claims)
         return _authorizer_policy("Allow", method_arn, principal_id, {
             "domain": normalize_domain(domain),
             "authProfileId": _profile_id(profile),
@@ -812,7 +814,65 @@ def _public_runtime_auth(profile: Dict[str, Any], *, enabled: bool = True) -> Di
             auth_payload[optional_path] = optional_value
     if not auth_payload["userPoolId"]:
         del auth_payload["userPoolId"]
+    session_payload = _public_runtime_auth_session(profile)
+    if session_payload:
+        auth_payload["session"] = session_payload
+    admin_payload = _public_runtime_auth_admin(profile)
+    if admin_payload:
+        auth_payload["admin"] = admin_payload
     return auth_payload
+
+
+def _public_runtime_auth_session(profile: Dict[str, Any]) -> Dict[str, Any]:
+    session = profile.get("session")
+    if not isinstance(session, dict):
+        return {}
+    payload: Dict[str, Any] = {"mode": "server-cookie"}
+    for key in ("signinPath", "mePath", "logoutPath"):
+        value = str(session.get(key) or "").strip()
+        if value:
+            _validate_same_origin_path(value, key)
+            payload[key] = value
+    for key in ("csrfCookieName", "csrfHeaderName"):
+        value = str(session.get(key) or "").strip()
+        if value:
+            if CONTROL_OR_WHITESPACE_RE.search(value):
+                raise AuthRegistryError(f"{key} is invalid")
+            payload[key] = value
+    return payload
+
+
+def _public_runtime_auth_admin(profile: Dict[str, Any]) -> Dict[str, Any]:
+    admin = profile.get("admin")
+    if not isinstance(admin, dict):
+        return {}
+    payload: Dict[str, Any] = {}
+    for key in (
+        "usersPath",
+        "approveUserPathTemplate",
+        "groupsPathTemplate",
+        "suspendUserPathTemplate",
+        "reactivateUserPathTemplate",
+    ):
+        value = str(admin.get(key) or "").strip()
+        if value:
+            _validate_same_origin_path(value, key)
+            payload[key] = value
+    return payload
+
+
+def _validate_public_auth_service_metadata(profile: Dict[str, Any]) -> None:
+    session = profile.get("session")
+    if session is not None:
+        if not isinstance(session, dict) or str(session.get("mode") or "server-cookie").strip() != "server-cookie":
+            raise AuthRegistryError("Auth session config is invalid")
+        _public_runtime_auth_session(profile)
+
+    admin = profile.get("admin")
+    if admin is not None:
+        if not isinstance(admin, dict):
+            raise AuthRegistryError("Auth admin config is invalid")
+        _public_runtime_auth_admin(profile)
 
 
 def _load_local_auth_registry_for_domain(domain: str) -> Optional[Dict[str, Any]]:
@@ -991,6 +1051,10 @@ def _audiences(profile: Dict[str, Any]) -> list[str]:
 
 
 def _claims_allowed_for_profile(claims: Dict[str, Any], profile: Dict[str, Any]) -> bool:
+    if not _claims_subject(claims):
+        return False
+    if not _claims_token_use_allowed(claims, profile):
+        return False
     issuer = str(profile.get("issuer") or "").strip()
     if issuer and claims.get("iss") != issuer:
         return False
@@ -1014,6 +1078,20 @@ def _claims_allowed_for_profile(claims: Dict[str, Any], profile: Dict[str, Any])
         if not actual_groups.intersection(allowed_groups):
             return False
     return True
+
+
+def _claims_subject(claims: Dict[str, Any]) -> str:
+    return str(claims.get("sub") or claims.get("username") or "").strip()
+
+
+def _claims_token_use_allowed(claims: Dict[str, Any], profile: Dict[str, Any]) -> bool:
+    token_use = str(claims.get("token_use") or "").strip()
+    if not token_use:
+        return False
+    allowed = set(_string_list(profile.get("allowedTokenUses")) or ["id", "access"])
+    if not allowed.issubset({"id", "access"}):
+        return False
+    return token_use in allowed
 
 
 def _claims_match_audience(claims: Dict[str, Any], audiences: list[str]) -> bool:

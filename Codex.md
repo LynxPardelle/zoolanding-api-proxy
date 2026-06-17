@@ -178,7 +178,14 @@
 - The API proxy now supports a separate SAM testing stack, `zoolanding-api-proxy-test`, with `ApiStageName=Test`, `AuthRuntimeEnvironment=test`, and CORS scoped to `https://test.zoolandingpage.com.mx`.
 - Production remains `zoolanding-api-proxy` with `ApiStageName=Prod` and `AuthRuntimeEnvironment=prod`.
 - Production stack `zoolanding-api-proxy` already manages the API Gateway `Prod` stage under SAM-generated logical ID `ApiProxyApiProdStage`. Keep the production template stage literal as `Prod`; changing `AWS::Serverless::Api.StageName` to an intrinsic/parameter makes SAM generate a different logical ID and CloudFormation fails early because the live stage already exists.
+
+## 2026-06-17 04:48 CT - Auth Admin Runtime Metadata
+
+- `/auth/runtime-config` may expose public-safe `runtime.auth.session` and `runtime.auth.admin` same-origin path metadata so Angular drafts can call the separate auth-admin BFF for server-cookie sessions and admin user management.
+- The API proxy must continue to keep auth-admin policy server-only: no `adminGroups`, `manageableGroups`, tenant mutation policy, Cognito secrets, JWTs, access tokens, refresh tokens, or credential refs in public runtime-config responses.
+- Auth-admin request authorization happens in the dedicated BFF through HttpOnly session cookies, CSRF, and draft/profile context headers. The API proxy's role here is only to publish safe runtime metadata from the server-only registry.
 - Drafts that want one Cognito user pool for testing and production users can declare `environmentClaim`, for example `custom:zoolanding_env`, in the server-only auth profile. Custom signup writes that claim from the Lambda stack environment, never from browser input.
 - Signin, protected integrations, and `DraftJwtRequestAuthorizer` enforce `environmentClaim` when present, so a verified `prod` JWT is denied by the `test` stack and vice versa.
+- JWT authorizer policy requires a subject and an allowed Cognito `token_use`; profiles can narrow accepted values through server-only `allowedTokenUses`, with `id` and `access` as the default contract.
 - The Cognito executor can add the mutable custom environment attribute to an existing user pool through `AddCustomAttributes`; active profiles with `environmentClaim` now get a repair-only plan with `ensure-user-pool` plus `ensure-user-environment-attribute`, without social IdP preflight and without rewriting effective runtime auth state. Console-created users still need the attribute set or repaired before passing environment-scoped auth.
 - `zoolanding-api-proxy-test` was created, then updated, in `us-east-1`; stack output `ApiUrl` is `https://11zpm6wug2.execute-api.us-east-1.amazonaws.com/Test`, `AuthRuntimeEnvironment=test`, `AuthProvisioningApplyEnabled=false`, and `AuthProvisioningStateTableMode=existing`.

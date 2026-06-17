@@ -183,6 +183,54 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
         self.assertNotIn("clientSecret", json.dumps(body))
         self.assertNotIn("facebook", json.dumps(body))
 
+    def test_runtime_config_includes_safe_session_and_admin_paths(self):
+        registry = active_registry()
+        registry["profiles"][0]["session"] = {
+            "mode": "server-cookie",
+            "signinPath": "/auth/session/signin",
+            "mePath": "/auth/session/me",
+            "logoutPath": "/auth/session/logout",
+            "csrfCookieName": "zlp_csrf",
+            "csrfHeaderName": "X-ZLP-CSRF",
+        }
+        registry["profiles"][0]["admin"] = {
+            "usersPath": "/auth/admin/users",
+            "approveUserPathTemplate": "/auth/admin/users/{subject}/approve",
+            "groupsPathTemplate": "/auth/admin/users/{subject}/groups",
+            "suspendUserPathTemplate": "/auth/admin/users/{subject}/suspend",
+            "reactivateUserPathTemplate": "/auth/admin/users/{subject}/reactivate",
+        }
+        event = api_event("/auth/runtime-config", {
+            "domain": "example.test",
+            "authProfileId": "staff",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        runtime_auth = payload(response)["auth"]
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(runtime_auth["session"], registry["profiles"][0]["session"])
+        self.assertEqual(runtime_auth["admin"], registry["profiles"][0]["admin"])
+        self.assertNotIn("tables", json.dumps(runtime_auth))
+
+    def test_runtime_config_rejects_unsafe_session_and_admin_paths(self):
+        registry = active_registry()
+        registry["profiles"][0]["session"] = {
+            "mode": "server-cookie",
+            "signinPath": "https://evil.example/auth/session/signin",
+        }
+        event = api_event("/auth/runtime-config", {
+            "domain": "example.test",
+            "authProfileId": "staff",
+        })
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(payload(response)["error"], "signinPath must be a same-origin path")
+
     def test_runtime_config_disables_profiles_that_are_not_active(self):
         event = api_event("/auth/runtime-config", {
             "domain": "example.test",
@@ -542,6 +590,7 @@ class TestAuthServiceCustomAuthForms(unittest.TestCase):
             "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
             "aud": "public-client-id",
             "sub": "user-123",
+            "token_use": "id",
             "email": "client@example.test",
             "name": "Client Example",
             "custom:tenant_id": "tenant-a",
@@ -2169,6 +2218,7 @@ class TestAuthServiceAuthorizer(unittest.TestCase):
             "sub": "user-123",
             "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
             "client_id": "public-client-id",
+            "token_use": "access",
             "custom:tenant_id": "tenant-a",
             "cognito:groups": ["Editors"],
         }
@@ -2199,6 +2249,7 @@ class TestAuthServiceAuthorizer(unittest.TestCase):
             "sub": "user-123",
             "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
             "client_id": "public-client-id",
+            "token_use": "access",
             "custom:tenant_id": "tenant-a",
             "cognito:groups": ["Viewers"],
         }
@@ -2226,6 +2277,7 @@ class TestAuthServiceAuthorizer(unittest.TestCase):
             "sub": "user-123",
             "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
             "client_id": "public-client-id",
+            "token_use": "access",
             "custom:tenant_id": "tenant-a",
             "custom:zoolanding_env": "prod",
             "cognito:groups": ["Editors"],
@@ -2267,6 +2319,37 @@ class TestAuthServiceAuthorizer(unittest.TestCase):
         response = auth.jwt_authorizer_handler(event, Ctx())
 
         self.assertEqual(response["policyDocument"]["Statement"][0]["Effect"], "Deny")
+
+    def test_jwt_authorizer_denies_claims_without_token_use_or_subject(self):
+        event = {
+            "type": "REQUEST",
+            "methodArn": "arn:aws:execute-api:us-east-1:123456789012:api/Prod/GET/blogs",
+            "headers": {
+                "Authorization": "Bearer header.payload.signature",
+                "x-zoolanding-domain": "example.test",
+                "x-zoolanding-auth-profile-id": "staff",
+            },
+        }
+        base_claims = {
+            "sub": "user-123",
+            "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool",
+            "client_id": "public-client-id",
+            "token_use": "access",
+            "custom:tenant_id": "tenant-a",
+            "cognito:groups": ["Editors"],
+        }
+
+        for claims in (
+            {key: value for key, value in base_claims.items() if key != "token_use"},
+            {key: value for key, value in base_claims.items() if key != "sub"},
+            {**base_claims, "token_use": "refresh"},
+        ):
+            with self.subTest(claims=claims), \
+                    patch.object(auth, "load_auth_registry_for_domain", return_value=active_registry()), \
+                    patch.object(auth, "verify_jwt", return_value=claims):
+                response = auth.jwt_authorizer_handler(event, Ctx())
+
+            self.assertEqual(response["policyDocument"]["Statement"][0]["Effect"], "Deny")
 
 
 class TestAuthRegistryAdapter(unittest.TestCase):
