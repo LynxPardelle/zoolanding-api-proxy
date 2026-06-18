@@ -190,7 +190,11 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
             "signinPath": "/auth/session/signin",
             "mePath": "/auth/session/me",
             "logoutPath": "/auth/session/logout",
+            "challengeRespondPath": "/auth/session/challenge/respond",
+            "mfaSetupPath": "/auth/session/mfa/setup",
+            "mfaVerifyPath": "/auth/session/mfa/verify",
             "csrfCookieName": "zlp_csrf",
+            "challengeCsrfCookieName": "zlp_challenge_csrf",
             "csrfHeaderName": "X-ZLP-CSRF",
         }
         registry["profiles"][0]["admin"] = {
@@ -218,7 +222,7 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
         registry = active_registry()
         registry["profiles"][0]["session"] = {
             "mode": "server-cookie",
-            "signinPath": "https://evil.example/auth/session/signin",
+            "challengeRespondPath": "https://evil.example/auth/session/challenge/respond",
         }
         event = api_event("/auth/runtime-config", {
             "domain": "example.test",
@@ -229,7 +233,7 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
             response = auth.auth_lambda_handler(event, Ctx())
 
         self.assertEqual(response["statusCode"], 500)
-        self.assertEqual(payload(response)["error"], "signinPath must be a same-origin path")
+        self.assertEqual(payload(response)["error"], "challengeRespondPath must be a same-origin path")
 
     def test_runtime_config_disables_profiles_that_are_not_active(self):
         event = api_event("/auth/runtime-config", {
