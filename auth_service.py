@@ -842,12 +842,12 @@ def _public_runtime_auth_session(profile: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(session, dict):
         return {}
     payload: Dict[str, Any] = {"mode": "server-cookie"}
-    for key in ("signinPath", "mePath", "logoutPath"):
+    for key in ("signinPath", "mePath", "logoutPath", "challengeRespondPath", "mfaSetupPath", "mfaVerifyPath"):
         value = str(session.get(key) or "").strip()
         if value:
             _validate_same_origin_path(value, key)
             payload[key] = value
-    for key in ("csrfCookieName", "csrfHeaderName"):
+    for key in ("csrfCookieName", "challengeCsrfCookieName", "csrfHeaderName"):
         value = str(session.get(key) or "").strip()
         if value:
             if CONTROL_OR_WHITESPACE_RE.search(value):
