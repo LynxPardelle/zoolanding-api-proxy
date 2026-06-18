@@ -918,6 +918,7 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
             "cognito-idp:ListTagsForResource",
             "cognito-idp:ListUserPoolClients",
             "cognito-idp:ListUserPools",
+            "cognito-idp:SetUserPoolMfaConfig",
             "cognito-idp:UpdateIdentityProvider",
             "cognito-idp:UpdateUserPoolClient",
             "ssm:GetParameter",
@@ -965,8 +966,10 @@ class TestAuthServiceTemplateContract(unittest.TestCase):
         scoped_actions = set(re.findall(r"cognito-idp:[A-Za-z]+", scoped_statement.group("actions")))
         self.assertIn("cognito-idp:ListTagsForResource", scoped_actions)
         self.assertIn("cognito-idp:ListUserPoolClients", scoped_actions)
+        self.assertIn("cognito-idp:SetUserPoolMfaConfig", scoped_actions)
         self.assertNotIn("cognito-idp:ListTagsForResource", wildcard_actions)
         self.assertNotIn("cognito-idp:ListUserPoolClients", wildcard_actions)
+        self.assertNotIn("cognito-idp:SetUserPoolMfaConfig", wildcard_actions)
         self.assertNotIn("cognito-idp:CreateUserPool", api_proxy)
         self.assertNotIn("cognito-idp:CreateUserPoolClient", api_proxy)
         self.assertNotIn("cognito-idp:CreateIdentityProvider", api_proxy)
@@ -1060,6 +1063,38 @@ class TestAuthServiceProvisioningPlan(unittest.TestCase):
         self.assertNotIn("clientSecretValue", json.dumps(body))
         self.assertNotIn("refreshToken", json.dumps(body))
         self.assertNotIn("must-not-pass", json.dumps(body))
+
+    def test_provisioning_plan_includes_optional_totp_mfa_operation_when_declared(self):
+        registry = active_registry()
+        registry["profiles"][1]["mfa"] = {
+            "mode": "optional",
+            "totp": {"enabled": True},
+        }
+        event = api_event(
+            "/auth/provisioning-plan",
+            {"domain": "example.test", "authProfileId": "planned"},
+            request_context={
+                "identity": {
+                    "userArn": "arn:aws:sts::123456789012:assumed-role/zoolanding-auth-planner/session"
+                }
+            },
+        )
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.dict(os.environ, {"AUTH_PROVISIONING_ALLOWED_ROLE_NAMES": "zoolanding-auth-planner"}):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        operation_ids = [operation["operationId"] for operation in body["plan"]["operations"]]
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["plan"]["mfa"], {
+            "mode": "optional",
+            "totp": {"enabled": True},
+            "cognitoConfiguration": "OPTIONAL",
+        })
+        self.assertIn("ensure-mfa-config", operation_ids)
+        self.assertLess(operation_ids.index("ensure-user-pool"), operation_ids.index("ensure-mfa-config"))
+        self.assertLess(operation_ids.index("ensure-mfa-config"), operation_ids.index("finalize-runtime-activation"))
 
     def test_plan_key_and_operation_idempotency_change_with_sanitized_config(self):
         registry = active_registry()
@@ -1295,6 +1330,19 @@ class FakeCognitoClient:
         schema = user_pool.setdefault("SchemaAttributes", [])
         for attribute in kwargs.get("CustomAttributes") or []:
             schema.append(dict(attribute))
+        return {}
+
+    def set_user_pool_mfa_config(self, **kwargs):
+        self._record("set_user_pool_mfa_config", **kwargs)
+        user_pool = self.user_pools.setdefault(kwargs["UserPoolId"], {
+            "Id": kwargs["UserPoolId"],
+            "Name": "unknown",
+            "Arn": f"arn:aws:cognito-idp:us-east-1:123456789012:userpool/{kwargs['UserPoolId']}",
+            "Tags": {},
+            "SchemaAttributes": [],
+        })
+        user_pool["MfaConfiguration"] = kwargs.get("MfaConfiguration")
+        user_pool["SoftwareTokenMfaConfiguration"] = kwargs.get("SoftwareTokenMfaConfiguration")
         return {}
 
     def list_user_pools(self, **kwargs):
@@ -1761,6 +1809,31 @@ class TestAuthServiceProvisioningExecutor(unittest.TestCase):
         self.assertNotIn("/zoolanding/auth", serialized)
         self.assertNotIn("google-client-secret-test", serialized)
         self.assertNotIn("facebook-client-secret-test", serialized)
+
+    def test_executor_apply_configures_optional_totp_mfa_when_declared(self):
+        reset_auth_clients()
+        registry = active_registry()
+        registry["profiles"][1]["mfa"] = {
+            "mode": "optional",
+            "totp": {"enabled": True},
+        }
+        event, _plan = self.apply_event(registry=registry)
+        cognito, dynamodb, ssm, fake_boto3 = self.fake_aws()
+
+        with patch.object(auth, "load_auth_registry_for_domain", return_value=registry), \
+                patch.object(auth, "boto3", fake_boto3), \
+                patch.dict(os.environ, self.apply_env()):
+            response = auth.auth_lambda_handler(event, Ctx())
+
+        body = payload(response)
+        mfa_call = next(kwargs for name, kwargs in cognito.calls if name == "set_user_pool_mfa_config")
+        self.assertEqual(response["statusCode"], 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["executor"]["executionStatus"], "applied")
+        self.assertEqual(mfa_call["MfaConfiguration"], "OPTIONAL")
+        self.assertEqual(mfa_call["SoftwareTokenMfaConfiguration"], {"Enabled": True})
+        self.assertEqual(body["executor"]["outputs"]["mfaConfiguration"], "OPTIONAL")
+        self.assertEqual(body["executor"]["outputs"]["softwareTokenMfaEnabled"], True)
 
     def test_executor_apply_adds_environment_custom_attribute_to_existing_pool(self):
         reset_auth_clients()

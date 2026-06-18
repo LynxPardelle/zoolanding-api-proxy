@@ -204,3 +204,10 @@
 
 - The shared `AuthProvisioningStateTable` (`zoolanding-auth-provisioning-state`) stores server-only auth provisioning state and should have DynamoDB point-in-time recovery enabled.
 - The `test` stack references this table as `existing`; the production stack owns creation through CloudFormation. Keep PITR in the template for created tables and verify the existing live table separately with `describe-continuous-backups`.
+
+## 2026-06-18 00:21 CT - Cognito MFA Provisioning Policy
+
+- Auth profiles can declare server-only `mfa.mode` as `off`, `optional`, or `required`; `optional` and `required` require enabled TOTP policy.
+- Provisioning plan hashes include MFA policy and can emit `ensure-mfa-config` for planned/provisioning profiles and repair operations for active profiles.
+- The executor reconciles Cognito TOTP MFA through `SetUserPoolMfaConfig` and returns only sanitized `mfaConfiguration` / `softwareTokenMfaEnabled` output.
+- Zoosite currently uses optional TOTP MFA so existing users can enroll without blocking all sign-ins immediately.
