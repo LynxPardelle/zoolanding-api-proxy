@@ -851,6 +851,7 @@ def _public_runtime_auth_session(profile: Dict[str, Any]) -> Dict[str, Any]:
         "mfaVerifyPath",
         "mfaEnrollStartPath",
         "mfaEnrollVerifyPath",
+        "mfaDisablePath",
     ):
         value = str(session.get(key) or "").strip()
         if value:
