@@ -877,6 +877,7 @@ def _public_runtime_auth_admin(profile: Dict[str, Any]) -> Dict[str, Any]:
         "groupsPathTemplate",
         "suspendUserPathTemplate",
         "reactivateUserPathTemplate",
+        "resetUserMfaPathTemplate",
     ):
         value = str(admin.get(key) or "").strip()
         if value:

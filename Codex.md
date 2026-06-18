@@ -1,5 +1,10 @@
 # Codex Agent Memory
 
+## 2026-06-18 16:44 CT - Auth Admin MFA Reset Runtime Path
+
+- Public `/auth/runtime-config` may expose `auth.admin.resetUserMfaPathTemplate` as same-origin routing metadata for Angular's generic admin action handler.
+- The path is not authorization policy and does not include Cognito tokens, TOTP setup material, tenant policy, admin groups, or secrets. The auth-admin BFF still enforces HttpOnly session, admin group authorization, CSRF, and self-reset blocking.
+
 ## 2026-05-29 CT - TIDAL Credential Migrated To SSM
 
 - Runtime credential refs now use SSM SecureString parameters named `/{credentialRef}`. For `zoolanding/api/music/tidal`, the SSM parameter is `/zoolanding/api/music/tidal`.
