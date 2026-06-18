@@ -343,6 +343,8 @@ Resources:
           KeyType: HASH
         - AttributeName: sk
           KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   AuthProvisioningExecutorFunction:
     Type: AWS::Serverless::Function

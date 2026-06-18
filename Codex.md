@@ -199,3 +199,8 @@
 - The `zoolanding-api-proxy-test` stack remains the testing runtime with `AUTH_RUNTIME_ENVIRONMENT=test`, testing CORS, and its own API Gateway ID, but its deployed API Gateway stage path is `/Prod`.
 - Keep `AWS::Serverless::Api.StageName` literal `Prod` for all API proxy stacks unless the production stack is intentionally migrated. Parameterizing the stage changes SAM-generated logical IDs and can replace or conflict with the live production `ApiProxyApiProdStage`.
 - Angular testing auth endpoints must use `https://11zpm6wug2.execute-api.us-east-1.amazonaws.com/Prod`, not the historical `/Test` path.
+
+## 2026-06-17 23:17 CT - Auth Provisioning State PITR
+
+- The shared `AuthProvisioningStateTable` (`zoolanding-auth-provisioning-state`) stores server-only auth provisioning state and should have DynamoDB point-in-time recovery enabled.
+- The `test` stack references this table as `existing`; the production stack owns creation through CloudFormation. Keep PITR in the template for created tables and verify the existing live table separately with `describe-continuous-backups`.
