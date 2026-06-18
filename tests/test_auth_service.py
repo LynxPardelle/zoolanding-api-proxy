@@ -207,6 +207,7 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
             "groupsPathTemplate": "/auth/admin/users/{subject}/groups",
             "suspendUserPathTemplate": "/auth/admin/users/{subject}/suspend",
             "reactivateUserPathTemplate": "/auth/admin/users/{subject}/reactivate",
+            "resetUserMfaPathTemplate": "/auth/admin/users/{subject}/mfa/reset",
         }
         event = api_event("/auth/runtime-config", {
             "domain": "example.test",
