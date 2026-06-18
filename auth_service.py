@@ -65,6 +65,19 @@ AUTH_PATHS = {
 }
 AUTH_PROFILE_STATUSES = {"active", "planned", "provisioning", "suspended", "failed"}
 AUTH_RUNTIME_ENVIRONMENTS = {"dev", "test", "prod"}
+AUTH_MFA_MODES = {
+    "disabled": "off",
+    "false": "off",
+    "off": "off",
+    "optional": "optional",
+    "required": "required",
+    "true": "optional",
+}
+COGNITO_MFA_CONFIGURATION = {
+    "off": "OFF",
+    "optional": "OPTIONAL",
+    "required": "ON",
+}
 AUTH_PROVISIONING_PLAN_SCHEMA_VERSION = "2026-06-10.v1"
 AUTH_PROVISIONING_EXECUTOR_SCHEMA_VERSION = "2026-06-10.executor.v1"
 TEST_PREVIEW_ORIGIN_HOST = "test.zoolandingpage.com.mx"
@@ -937,10 +950,12 @@ def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
     issuer = str(profile.get("issuer") or "").strip()
     public_runtime_auth = _public_runtime_auth(profile, enabled=status == "active")
     social_identity_providers = _social_identity_providers(profile)
+    mfa_config = _mfa_config(profile)
     config_hash = _provisioning_config_hash(
         domain=normalized_domain,
         profile=profile,
         social_identity_providers=social_identity_providers,
+        mfa_config=mfa_config,
     )
     operations = _provisioning_operations(
         domain=normalized_domain,
@@ -948,6 +963,7 @@ def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
         tenant_id=str(profile.get("tenantId") or "").strip(),
         status=status,
         environment_claim=_environment_claim(profile),
+        mfa_config=mfa_config,
         social_identity_providers=social_identity_providers,
         config_hash=config_hash,
     )
@@ -989,6 +1005,7 @@ def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
             "claim": _environment_claim(profile),
             "allowed": sorted(AUTH_RUNTIME_ENVIRONMENTS),
         },
+        "mfa": mfa_config,
         "socialIdentityProviders": social_identity_providers,
         "operations": operations,
         "expectedOutputs": {
@@ -1003,6 +1020,8 @@ def _cognito_plan(domain: str, profile: Dict[str, Any]) -> Dict[str, Any]:
             "logoutUrls": _string_list(profile.get("logoutUrls")),
             "runtimeAuthEnabled": True,
             "environmentClaim": _environment_claim(profile),
+            "mfaConfiguration": str(mfa_config.get("cognitoConfiguration") or ""),
+            "softwareTokenMfaEnabled": bool((mfa_config.get("totp") or {}).get("enabled")),
         },
         "jwtAuthorizer": {
             "audienceMode": "aud-or-client_id",
@@ -1144,6 +1163,7 @@ def _provisioning_config_hash(
     domain: str,
     profile: Dict[str, Any],
     social_identity_providers: list[Dict[str, Any]],
+    mfa_config: Dict[str, Any],
 ) -> str:
     sanitized = {
         "domain": normalize_domain(domain),
@@ -1174,6 +1194,7 @@ def _provisioning_config_hash(
         "userEnvironment": {
             "claim": _environment_claim(profile),
         },
+        "mfa": mfa_config,
         "jwtAuthorizer": {
             "tenantClaim": str(profile.get("tenantClaim") or "custom:tenant_id").strip(),
             "environmentClaim": _environment_claim(profile),
@@ -1639,6 +1660,8 @@ def _execute_cognito_operation(
         return _ensure_cognito_user_pool(plan, operation_outputs)
     if operation_id == "ensure-user-environment-attribute":
         return _ensure_cognito_user_environment_attribute(plan, operation_outputs)
+    if operation_id == "ensure-mfa-config":
+        return _ensure_cognito_mfa_config(plan, operation_outputs)
     if operation_id == "ensure-hosted-ui-domain":
         return _ensure_cognito_hosted_ui_domain(plan, operation_outputs)
     if operation_id == "ensure-public-client":
@@ -1768,6 +1791,24 @@ def _cognito_environment_schema_attributes(plan: Dict[str, Any]) -> list[Dict[st
             "StringAttributeConstraints": {"MinLength": "3", "MaxLength": "16"},
         }
     ]
+
+
+def _ensure_cognito_mfa_config(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> Dict[str, Any]:
+    user_pool_id = _required_output(operation_outputs, "userPoolId")
+    mfa_config = plan.get("mfa") if isinstance(plan.get("mfa"), dict) else {}
+    mode = str(mfa_config.get("mode") or "off")
+    cognito_configuration = COGNITO_MFA_CONFIGURATION.get(mode, "OFF")
+    totp = mfa_config.get("totp") if isinstance(mfa_config.get("totp"), dict) else {}
+    totp_enabled = bool(totp.get("enabled"))
+    _cognito_idp().set_user_pool_mfa_config(
+        UserPoolId=user_pool_id,
+        MfaConfiguration=cognito_configuration,
+        SoftwareTokenMfaConfiguration={"Enabled": totp_enabled},
+    )
+    return {
+        "mfaConfiguration": cognito_configuration,
+        "softwareTokenMfaEnabled": totp_enabled,
+    }
 
 
 def _ensure_cognito_hosted_ui_domain(plan: Dict[str, Any], operation_outputs: Dict[str, Any]) -> Dict[str, Any]:
@@ -2293,6 +2334,8 @@ def _sanitize_apply_outputs(outputs: Dict[str, Any]) -> Dict[str, Any]:
         "hostedUiDomainPrefix",
         "identityProviders",
         "issuer",
+        "mfaConfiguration",
+        "softwareTokenMfaEnabled",
         "userPoolClientId",
         "userPoolId",
     }
@@ -2747,7 +2790,40 @@ def _validate_provisioning_profile(profile: Dict[str, Any]) -> None:
         if profile.get(optional_path):
             _validate_same_origin_path(str(profile.get(optional_path)), optional_path)
 
+    _mfa_config(profile)
     _validate_social_identity_provider_metadata(profile)
+
+
+def _mfa_config(profile: Dict[str, Any]) -> Dict[str, Any]:
+    raw = profile.get("mfa")
+    if raw is None:
+        return {
+            "mode": "off",
+            "totp": {"enabled": False},
+            "cognitoConfiguration": "OFF",
+        }
+    if not isinstance(raw, dict):
+        raise AuthRegistryError("mfa must be an object")
+
+    raw_mode = str(raw.get("mode") or "optional").strip().lower()
+    mode = AUTH_MFA_MODES.get(raw_mode)
+    if not mode:
+        raise AuthRegistryError("mfa.mode is invalid")
+
+    totp_raw = raw.get("totp") if isinstance(raw.get("totp"), dict) else {}
+    totp_enabled = bool(totp_raw.get("enabled", mode != "off"))
+    if mode in {"optional", "required"} and not totp_enabled:
+        raise AuthRegistryError("mfa.totp.enabled must be true when mfa.mode is enabled")
+
+    return {
+        "mode": mode,
+        "totp": {"enabled": totp_enabled},
+        "cognitoConfiguration": COGNITO_MFA_CONFIGURATION[mode],
+    }
+
+
+def _mfa_enabled(config: Dict[str, Any]) -> bool:
+    return str(config.get("mode") or "off") != "off"
 
 
 def _plan_lifecycle(status: str, *, has_operations: bool = False) -> Dict[str, Any]:
@@ -2897,35 +2973,48 @@ def _provisioning_operations(
     tenant_id: str,
     status: str,
     environment_claim: str,
+    mfa_config: Dict[str, Any],
     social_identity_providers: list[Dict[str, Any]],
     config_hash: str,
 ) -> list[Dict[str, Any]]:
     if status == "active":
+        operations: list[Dict[str, Any]] = []
+        if environment_claim or _mfa_enabled(mfa_config):
+            operations.append(_plan_operation(
+                domain=domain,
+                auth_profile_id=auth_profile_id,
+                tenant_id=tenant_id,
+                status=status,
+                config_hash=config_hash,
+                operation_id="ensure-user-pool",
+                stage="identity-core",
+                expected_status_after_completion="active",
+            ))
         if environment_claim:
-            return [
-                _plan_operation(
-                    domain=domain,
-                    auth_profile_id=auth_profile_id,
-                    tenant_id=tenant_id,
-                    status=status,
-                    config_hash=config_hash,
-                    operation_id="ensure-user-pool",
-                    stage="identity-core",
-                    expected_status_after_completion="active",
-                ),
-                _plan_operation(
-                    domain=domain,
-                    auth_profile_id=auth_profile_id,
-                    tenant_id=tenant_id,
-                    status=status,
-                    config_hash=config_hash,
-                    operation_id="ensure-user-environment-attribute",
-                    stage="user-environment",
-                    expected_status_after_completion="active",
-                    depends_on=["ensure-user-pool"],
-                ),
-            ]
-        return []
+            operations.append(_plan_operation(
+                domain=domain,
+                auth_profile_id=auth_profile_id,
+                tenant_id=tenant_id,
+                status=status,
+                config_hash=config_hash,
+                operation_id="ensure-user-environment-attribute",
+                stage="user-environment",
+                expected_status_after_completion="active",
+                depends_on=["ensure-user-pool"],
+            ))
+        if _mfa_enabled(mfa_config):
+            operations.append(_plan_operation(
+                domain=domain,
+                auth_profile_id=auth_profile_id,
+                tenant_id=tenant_id,
+                status=status,
+                config_hash=config_hash,
+                operation_id="ensure-mfa-config",
+                stage="mfa",
+                expected_status_after_completion="active",
+                depends_on=["ensure-user-pool"],
+            ))
+        return operations
     if status in {"suspended", "failed"}:
         return []
 
@@ -2951,6 +3040,20 @@ def _provisioning_operations(
                 config_hash=config_hash,
                 operation_id="ensure-user-environment-attribute",
                 stage="user-environment",
+                expected_status_after_completion="provisioning",
+                depends_on=["ensure-user-pool"],
+            )
+        )
+    if _mfa_enabled(mfa_config):
+        operations.append(
+            _plan_operation(
+                domain=domain,
+                auth_profile_id=auth_profile_id,
+                tenant_id=tenant_id,
+                status=status,
+                config_hash=config_hash,
+                operation_id="ensure-mfa-config",
+                stage="mfa",
                 expected_status_after_completion="provisioning",
                 depends_on=["ensure-user-pool"],
             )
