@@ -211,3 +211,8 @@
 - Provisioning plan hashes include MFA policy and can emit `ensure-mfa-config` for planned/provisioning profiles and repair operations for active profiles.
 - The executor reconciles Cognito TOTP MFA through `SetUserPoolMfaConfig` and returns only sanitized `mfaConfiguration` / `softwareTokenMfaEnabled` output.
 - Zoosite currently uses optional TOTP MFA so existing users can enroll without blocking all sign-ins immediately.
+
+## 2026-06-18 01:20 CT - Auth Runtime Voluntary MFA Metadata
+
+- Public `/auth/runtime-config` may expose safe same-origin voluntary MFA enrollment session metadata: `mfaEnrollStartPath`, `mfaEnrollVerifyPath`, and `mfaEnrollCsrfCookieName`.
+- These fields only tell Angular where to call the separate auth-admin BFF. The API proxy must still keep Cognito tokens, tenant/group policy, and auth-admin server-side state out of public runtime responses.
