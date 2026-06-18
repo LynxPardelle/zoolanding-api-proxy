@@ -195,6 +195,7 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
             "mfaVerifyPath": "/auth/session/mfa/verify",
             "mfaEnrollStartPath": "/auth/session/mfa/enroll/start",
             "mfaEnrollVerifyPath": "/auth/session/mfa/enroll/verify",
+            "mfaDisablePath": "/auth/session/mfa/disable",
             "csrfCookieName": "zlp_csrf",
             "challengeCsrfCookieName": "zlp_challenge_csrf",
             "mfaEnrollCsrfCookieName": "zlp_mfa_enroll_csrf",
@@ -225,7 +226,7 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
         registry = active_registry()
         registry["profiles"][0]["session"] = {
             "mode": "server-cookie",
-            "mfaEnrollStartPath": "https://evil.example/auth/session/mfa/enroll/start",
+            "mfaDisablePath": "https://evil.example/auth/session/mfa/disable",
         }
         event = api_event("/auth/runtime-config", {
             "domain": "example.test",
@@ -236,7 +237,7 @@ class TestAuthServiceRuntimeConfig(unittest.TestCase):
             response = auth.auth_lambda_handler(event, Ctx())
 
         self.assertEqual(response["statusCode"], 500)
-        self.assertEqual(payload(response)["error"], "mfaEnrollStartPath must be a same-origin path")
+        self.assertEqual(payload(response)["error"], "mfaDisablePath must be a same-origin path")
 
     def test_runtime_config_disables_profiles_that_are_not_active(self):
         event = api_event("/auth/runtime-config", {

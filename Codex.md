@@ -216,3 +216,8 @@
 
 - Public `/auth/runtime-config` may expose safe same-origin voluntary MFA enrollment session metadata: `mfaEnrollStartPath`, `mfaEnrollVerifyPath`, and `mfaEnrollCsrfCookieName`.
 - These fields only tell Angular where to call the separate auth-admin BFF. The API proxy must still keep Cognito tokens, tenant/group policy, and auth-admin server-side state out of public runtime responses.
+
+## 2026-06-18 03:42 CT - Auth Runtime MFA Disable Metadata
+
+- Public `/auth/runtime-config` may expose safe same-origin MFA disable session metadata through `mfaDisablePath`.
+- This field is routing metadata only. The actual disablement policy belongs to the auth-admin BFF and must require active session context, CSRF, current password, and current TOTP code before changing Cognito preference.
