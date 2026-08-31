@@ -89,6 +89,10 @@ Conditions:
     Fn::Equals:
       - Ref: AuthProvisioningStateTableMode
       - create
+  IsTestRuntimeEnvironment:
+    Fn::Equals:
+      - Ref: AuthRuntimeEnvironment
+      - test
 
 Resources:
   ApiProxyApi:
@@ -136,6 +140,17 @@ Resources:
             Ref: AuthProvisioningStateTableName
           AUTH_RUNTIME_ENVIRONMENT:
             Ref: AuthRuntimeEnvironment
+          SERVICE_BINDING_REGISTRY_V2_TABLE_NAME:
+            Fn::If:
+              - IsTestRuntimeEnvironment
+              - zoolanding-content-hub-test-ServiceBindingRegistryV2
+              - ''
+          SERVICE_BINDING_REGISTRY_V2_PARTITION:
+            Ref: AWS::Partition
+          SERVICE_BINDING_REGISTRY_V2_ACCOUNT_ID:
+            Ref: AWS::AccountId
+          SERVICE_BINDING_REGISTRY_V2_REGION:
+            Ref: AWS::Region
           LOG_LEVEL:
             Ref: LogLevel
       Policies:
@@ -175,6 +190,20 @@ Resources:
                 - cognito-idp:AdminAddUserToGroup
               Resource:
                 Fn::Sub: arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+        - Fn::If:
+            - IsTestRuntimeEnvironment
+            - Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                  Resource:
+                    Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+                  Condition:
+                    ForAllValues:StringEquals:
+                      dynamodb:LeadingKeys:
+                        - SERVICE_BINDING#test#thn-journal-test-v2
+            - Ref: AWS::NoValue
       Events:
         ApiProxyRead:
           Type: Api
@@ -526,6 +555,12 @@ Outputs:
     Description: Deployed Lambda function name.
     Value:
       Ref: ApiProxyFunction
+  ApiProxyFunctionRoleArn:
+    Description: Exact API Proxy execution role ARN for the THN registry resource policy.
+    Value:
+      Fn::GetAtt:
+        - ApiProxyFunctionRole
+        - Arn
   AuthJwtAuthorizerFunctionName:
     Description: Reusable JWT authorizer Lambda function name.
     Value:
