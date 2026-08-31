@@ -208,7 +208,6 @@ def _validate_record(
     record: Any,
     *,
     expected_descriptor: Mapping[str, str],
-    expected_registry_revision: int,
     trusted_scope: Mapping[str, str],
 ) -> dict[str, Any]:
     if not isinstance(record, Mapping) or set(record) != RECORD_FIELDS:
@@ -230,8 +229,6 @@ def _validate_record(
     if any(record.get(field) != value for field, value in fixed_coordinates.items()):
         raise _fail()
     if any(record.get(field) != value for field, value in expected_descriptor.items()):
-        raise _fail()
-    if record.get("registryRevision") != expected_registry_revision:
         raise _fail()
     if record.get("activationStatus") != "active":
         raise _fail()
@@ -255,7 +252,6 @@ def load_active_service_binding(
     client,
     *,
     expected_descriptor,
-    expected_registry_revision,
     trusted_resource_scope,
 ):
     """Strongly read and validate the one approved THN v2 binding.
@@ -267,7 +263,6 @@ def load_active_service_binding(
 
     try:
         descriptor = _validate_expected_descriptor(expected_descriptor)
-        registry_revision = _require_positive_integer(expected_registry_revision)
         trusted_scope = _validate_trusted_scope(trusted_resource_scope)
         configured_table = os.getenv(
             "SERVICE_BINDING_REGISTRY_V2_TABLE_NAME",
@@ -297,11 +292,9 @@ def load_active_service_binding(
         return _validate_record(
             record,
             expected_descriptor=descriptor,
-            expected_registry_revision=registry_revision,
             trusted_scope=trusted_scope,
         )
     except RegistryConsumerError:
         raise _fail() from None
     except Exception:
         raise _fail() from None
-

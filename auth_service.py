@@ -2615,7 +2615,6 @@ def _dynamodb():
 def load_thn_service_binding_v2(
     binding_descriptor: Dict[str, Any],
     expected_descriptor: Dict[str, Any],
-    expected_registry_revision: int,
 ):
     """Validate THN wiring and load its registry row without changing v1."""
 
@@ -2632,7 +2631,6 @@ def load_thn_service_binding_v2(
     return service_binding_registry_consumer_v2.load_active_service_binding(
         _dynamodb(),
         expected_descriptor=expected_descriptor,
-        expected_registry_revision=expected_registry_revision,
         trusted_resource_scope={
             "partition": os.getenv("SERVICE_BINDING_REGISTRY_V2_PARTITION", ""),
             "accountId": os.getenv("SERVICE_BINDING_REGISTRY_V2_ACCOUNT_ID", ""),

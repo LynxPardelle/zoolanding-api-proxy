@@ -1,4 +1,5 @@
 import copy
+import inspect
 import os
 import re
 import sys
@@ -113,7 +114,6 @@ class FakeDynamoDbClient:
 def load(client, **overrides):
     args = {
         "expected_descriptor": copy.deepcopy(DESCRIPTOR),
-        "expected_registry_revision": 7,
         "trusted_resource_scope": copy.deepcopy(TRUSTED_SCOPE),
     }
     args.update(overrides)
@@ -183,18 +183,56 @@ class TestServiceBindingRegistryConsumerV2(unittest.TestCase):
             with self.subTest(response_keys=sorted(response)):
                 self.assert_unavailable(lambda: load(FakeDynamoDbClient(response)))
 
-    def test_stale_descriptor_or_registry_revision_fails_closed(self):
+    def test_stale_descriptor_fails_closed(self):
         for field, replacement in (
             ("descriptorVersionId", "stale-version"),
             ("descriptorSha256", "b" * 64),
             ("authPolicyVersion", "stale-policy"),
-            ("registryRevision", 6),
         ):
             record = active_record()
             record[field] = replacement
             with self.subTest(field=field):
                 self.assert_unavailable(
                     lambda record=record: load(FakeDynamoDbClient({"Item": ddb_item(record)}))
+                )
+
+    def test_live_registry_revision_transition_is_accepted_without_local_cache(self):
+        self.assertNotIn(
+            "expected_registry_revision",
+            inspect.signature(consumer.load_active_service_binding).parameters,
+        )
+        self.assertNotIn(
+            "expected_registry_revision",
+            inspect.signature(auth.load_thn_service_binding_v2).parameters,
+        )
+        revision_seven = active_record()
+        revision_eight = active_record()
+        revision_eight["registryRevision"] = 8
+        client = FakeDynamoDbClient({"Item": ddb_item(revision_seven)})
+
+        first = load(client)
+        client.response = {"Item": ddb_item(revision_eight)}
+        second = load(client)
+
+        self.assertEqual(first["registryRevision"], 7)
+        self.assertEqual(second["registryRevision"], 8)
+        self.assertEqual(len(client.calls), 2)
+        self.assertTrue(all(call["ConsistentRead"] is True for call in client.calls))
+
+    def test_malformed_nonpositive_or_boolean_row_revision_fails_closed(self):
+        encoded_cases = {
+            "malformed-string": ddb_item({**active_record(), "registryRevision": "7"}),
+            "zero": ddb_item({**active_record(), "registryRevision": 0}),
+            "negative": ddb_item({**active_record(), "registryRevision": -1}),
+            "boolean": {
+                **ddb_item(active_record()),
+                "registryRevision": {"BOOL": True},
+            },
+        }
+        for label, item in encoded_cases.items():
+            with self.subTest(label=label):
+                self.assert_unavailable(
+                    lambda item=item: load(FakeDynamoDbClient({"Item": item}))
                 )
 
     def test_full_ownership_tuple_and_server_coordinates_are_exact(self):
@@ -267,7 +305,6 @@ class TestServiceBindingRegistryConsumerV2(unittest.TestCase):
                 self.assert_unavailable(
                     lambda descriptor=descriptor: load(client, expected_descriptor=descriptor)
                 )
-        self.assert_unavailable(lambda: load(client, expected_registry_revision=0))
         self.assert_unavailable(
             lambda: load(client, trusted_resource_scope={**TRUSTED_SCOPE, "region": "invalid"})
         )
@@ -301,13 +338,12 @@ class TestServiceBindingRegistryConsumerV2(unittest.TestCase):
                 "SERVICE_BINDING_REGISTRY_V2_REGION": "us-east-1",
             },
         ):
-            result = auth.load_thn_service_binding_v2(BINDING_DESCRIPTOR, DESCRIPTOR, 7)
+            result = auth.load_thn_service_binding_v2(BINDING_DESCRIPTOR, DESCRIPTOR)
 
         self.assertEqual(result, {"ok": True})
         loader.assert_called_once_with(
             sentinel,
             expected_descriptor=DESCRIPTOR,
-            expected_registry_revision=7,
             trusted_resource_scope=TRUSTED_SCOPE,
         )
 
@@ -343,7 +379,6 @@ class TestServiceBindingRegistryConsumerV2(unittest.TestCase):
                         lambda descriptor=descriptor: auth.load_thn_service_binding_v2(
                             descriptor,
                             DESCRIPTOR,
-                            7,
                         )
                     )
 
@@ -354,7 +389,7 @@ class TestServiceBindingRegistryConsumerV2(unittest.TestCase):
             side_effect=AssertionError("storage must not be called outside TEST"),
         ):
             self.assert_unavailable(
-                lambda: auth.load_thn_service_binding_v2(BINDING_DESCRIPTOR, DESCRIPTOR, 7)
+                lambda: auth.load_thn_service_binding_v2(BINDING_DESCRIPTOR, DESCRIPTOR)
             )
 
 
