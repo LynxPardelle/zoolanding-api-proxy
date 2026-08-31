@@ -7,7 +7,6 @@ import time
 import urllib.parse
 from typing import Any, Dict, Optional
 
-import service_binding_registry_consumer_v2
 from zoolanding_lambda_common import (
     alias_pk,
     default_version_prefix,
@@ -2610,33 +2609,6 @@ def _dynamodb():
     if _DYNAMODB_CLIENT is None:
         _DYNAMODB_CLIENT = boto3.client("dynamodb")
     return _DYNAMODB_CLIENT
-
-
-def load_thn_service_binding_v2(
-    binding_descriptor: Dict[str, Any],
-    expected_descriptor: Dict[str, Any],
-):
-    """Validate THN wiring and load its registry row without changing v1."""
-
-    runtime_environment = str(
-        os.getenv("AUTH_RUNTIME_ENVIRONMENT", AUTH_RUNTIME_ENVIRONMENT)
-    ).strip()
-    if runtime_environment != "test":
-        raise service_binding_registry_consumer_v2.RegistryConsumerError(
-            "service binding is unavailable"
-        )
-    service_binding_registry_consumer_v2.validate_active_binding_descriptor(
-        binding_descriptor
-    )
-    return service_binding_registry_consumer_v2.load_active_service_binding(
-        _dynamodb(),
-        expected_descriptor=expected_descriptor,
-        trusted_resource_scope={
-            "partition": os.getenv("SERVICE_BINDING_REGISTRY_V2_PARTITION", ""),
-            "accountId": os.getenv("SERVICE_BINDING_REGISTRY_V2_ACCOUNT_ID", ""),
-            "region": os.getenv("SERVICE_BINDING_REGISTRY_V2_REGION", ""),
-        },
-    )
 
 
 def _ssm():

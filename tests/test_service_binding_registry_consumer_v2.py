@@ -1,3 +1,4 @@
+import ast
 import copy
 import inspect
 import os
@@ -32,20 +33,6 @@ TRUSTED_SCOPE = {
     "accountId": "123456789012",
     "region": "us-east-1",
 }
-BINDING_DESCRIPTOR = {
-    "bindingId": "journal-v2",
-    "domain": "thehairnarrative.com",
-    "environment": "test",
-    "authProfileId": "journal-owner",
-    "featureId": "journal",
-    "hubId": "thehairnarrative-com-journal",
-    "serviceBindingId": "thn-journal-test-v2",
-    "authBasePath": "/auth-v2",
-    "contentHubBasePath": "/features/content-hub-v2",
-    "status": "active",
-}
-
-
 def ddb_value(value):
     if isinstance(value, str):
         return {"S": value}
@@ -132,10 +119,40 @@ def template_resource_block(template, resource_name):
 
 
 class TestConsumerAvailability(unittest.TestCase):
-    def test_consumer_and_auth_adapter_exist(self):
+    def test_consumer_exists_but_v1_handlers_do_not_wire_it(self):
         self.assertIsNotNone(consumer)
         self.assertTrue(callable(getattr(consumer, "load_active_service_binding", None)))
-        self.assertTrue(callable(getattr(auth, "load_thn_service_binding_v2", None)))
+        self.assertFalse(hasattr(auth, "load_thn_service_binding_v2"))
+        self.assertNotIn("service_binding_registry_consumer_v2", auth.__dict__)
+
+        for filename in ("auth_service.py", "lambda_function.py"):
+            with self.subTest(filename=filename):
+                path = os.path.join(PROJECT_ROOT, filename)
+                with open(path, encoding="utf-8") as source_file:
+                    source = source_file.read()
+                tree = ast.parse(source, filename=path)
+                imported_modules = {
+                    alias.name
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Import)
+                    for alias in node.names
+                }
+                imported_from_modules = {
+                    node.module
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.ImportFrom)
+                }
+                referenced_names = {
+                    node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+                }
+                referenced_attributes = {
+                    node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                }
+                self.assertNotIn("service_binding_registry_consumer_v2", imported_modules)
+                self.assertNotIn("service_binding_registry_consumer_v2", imported_from_modules)
+                self.assertNotIn("service_binding_registry_consumer_v2", referenced_names)
+                self.assertNotIn("load_thn_service_binding_v2", referenced_names)
+                self.assertNotIn("load_thn_service_binding_v2", referenced_attributes)
 
 
 @unittest.skipUnless(
@@ -200,10 +217,6 @@ class TestServiceBindingRegistryConsumerV2(unittest.TestCase):
         self.assertNotIn(
             "expected_registry_revision",
             inspect.signature(consumer.load_active_service_binding).parameters,
-        )
-        self.assertNotIn(
-            "expected_registry_revision",
-            inspect.signature(auth.load_thn_service_binding_v2).parameters,
         )
         revision_seven = active_record()
         revision_eight = active_record()
@@ -323,78 +336,8 @@ class TestServiceBindingRegistryConsumerV2(unittest.TestCase):
         malformed_item["writerEpoch"] = {"N": "not-an-integer"}
         self.assert_unavailable(lambda: load(FakeDynamoDbClient({"Item": malformed_item})))
 
-    def test_auth_adapter_uses_low_level_client_and_server_owned_scope(self):
-        sentinel = object()
-        with patch.object(auth, "_dynamodb", return_value=sentinel), patch.object(
-            auth.service_binding_registry_consumer_v2,
-            "load_active_service_binding",
-            return_value={"ok": True},
-        ) as loader, patch.dict(
-            os.environ,
-            {
-                "AUTH_RUNTIME_ENVIRONMENT": "test",
-                "SERVICE_BINDING_REGISTRY_V2_PARTITION": "aws",
-                "SERVICE_BINDING_REGISTRY_V2_ACCOUNT_ID": "123456789012",
-                "SERVICE_BINDING_REGISTRY_V2_REGION": "us-east-1",
-            },
-        ):
-            result = auth.load_thn_service_binding_v2(BINDING_DESCRIPTOR, DESCRIPTOR)
-
-        self.assertEqual(result, {"ok": True})
-        loader.assert_called_once_with(
-            sentinel,
-            expected_descriptor=DESCRIPTOR,
-            trusted_resource_scope=TRUSTED_SCOPE,
-        )
-
-    def test_auth_adapter_rejects_inactive_unknown_or_mismatched_binding_descriptor(self):
-        invalid_descriptors = []
-        for field, replacement in (
-            ("bindingId", "other"),
-            ("domain", "other.example"),
-            ("environment", "prod"),
-            ("authProfileId", "other"),
-            ("featureId", "other"),
-            ("hubId", "other"),
-            ("serviceBindingId", "other"),
-            ("authBasePath", "/auth"),
-            ("contentHubBasePath", "/features/content-hub"),
-            ("status", "inactive"),
-        ):
-            descriptor = copy.deepcopy(BINDING_DESCRIPTOR)
-            descriptor[field] = replacement
-            invalid_descriptors.append(descriptor)
-        with_unknown = copy.deepcopy(BINDING_DESCRIPTOR)
-        with_unknown["tenantId"] = "browser-controlled"
-        invalid_descriptors.append(with_unknown)
-
-        with patch.dict(os.environ, {"AUTH_RUNTIME_ENVIRONMENT": "test"}), patch.object(
-            auth,
-            "_dynamodb",
-            side_effect=AssertionError("storage must not be called for a bad descriptor"),
-        ):
-            for descriptor in invalid_descriptors:
-                with self.subTest(descriptor=descriptor):
-                    self.assert_unavailable(
-                        lambda descriptor=descriptor: auth.load_thn_service_binding_v2(
-                            descriptor,
-                            DESCRIPTOR,
-                        )
-                    )
-
-    def test_auth_adapter_is_unavailable_outside_the_test_runtime(self):
-        with patch.dict(os.environ, {"AUTH_RUNTIME_ENVIRONMENT": "prod"}), patch.object(
-            auth,
-            "_dynamodb",
-            side_effect=AssertionError("storage must not be called outside TEST"),
-        ):
-            self.assert_unavailable(
-                lambda: auth.load_thn_service_binding_v2(BINDING_DESCRIPTOR, DESCRIPTOR)
-            )
-
-
 class TestServiceBindingRegistryConsumerV2Template(unittest.TestCase):
-    def test_api_proxy_alone_gets_exact_key_registry_read_permission(self):
+    def test_shared_v1_functions_have_no_thn_registry_wiring_or_authority(self):
         with open(os.path.join(PROJECT_ROOT, "template.yaml"), encoding="utf-8") as template_file:
             template = template_file.read()
 
@@ -402,63 +345,21 @@ class TestServiceBindingRegistryConsumerV2Template(unittest.TestCase):
         executor = template_resource_block(template, "AuthProvisioningExecutorFunction")
         authorizer = template_resource_block(template, "AuthJwtAuthorizerFunction")
 
-        self.assertIn("SERVICE_BINDING_REGISTRY_V2_TABLE_NAME:", api_proxy)
-        self.assertIn(TABLE_NAME, api_proxy)
-        self.assertIn("SERVICE_BINDING_REGISTRY_V2_PARTITION:", api_proxy)
-        self.assertIn("Ref: AWS::Partition", api_proxy)
-        self.assertIn("SERVICE_BINDING_REGISTRY_V2_ACCOUNT_ID:", api_proxy)
-        self.assertIn("Ref: AWS::AccountId", api_proxy)
-        self.assertIn("SERVICE_BINDING_REGISTRY_V2_REGION:", api_proxy)
-        self.assertIn("Ref: AWS::Region", api_proxy)
-        self.assertRegex(
-            api_proxy,
-            re.compile(
-                r"Policies:.*?- Fn::If:\s+- IsTestRuntimeEnvironment\s+- Version:",
-                re.S,
-            ),
-        )
-        self.assertRegex(
-            api_proxy,
-            re.compile(
-                r"Action:\s*- dynamodb:GetItem\s+"
-                r"Resource:\s+Fn::Sub: "
-                r"arn:\$\{AWS::Partition\}:dynamodb:\$\{AWS::Region\}:"
-                r"\$\{AWS::AccountId\}:table/"
-                + re.escape(TABLE_NAME)
-                + r"\s+Condition:\s+ForAllValues:StringEquals:\s+"
-                r"dynamodb:LeadingKeys:\s+- "
-                + re.escape(BINDING_KEY),
-                re.S,
-            ),
-        )
-        registry_statement = re.search(
-            r"- Effect: Allow\s+Action:\s+- dynamodb:GetItem\s+"
-            r"Resource:\s+Fn::Sub:.*?ServiceBindingRegistryV2.*?"
-            r"(?=\n\s+- Effect:|\n\s+Events:)",
-            api_proxy,
-            re.S,
-        )
-        self.assertIsNotNone(registry_statement)
-        for forbidden in (
-            "dynamodb:BatchGetItem",
-            "dynamodb:ConditionCheckItem",
-            "dynamodb:PutItem",
-            "dynamodb:Query",
-            "dynamodb:Scan",
-            "dynamodb:TransactGetItems",
-            "dynamodb:UpdateItem",
+        for function_name, function_block in (
+            ("ApiProxyFunction", api_proxy),
+            ("AuthProvisioningExecutorFunction", executor),
+            ("AuthJwtAuthorizerFunction", authorizer),
         ):
-            self.assertNotIn(forbidden, registry_statement.group(0))
-        self.assertNotIn("SERVICE_BINDING_REGISTRY_V2_TABLE_NAME", executor)
-        self.assertNotIn("SERVICE_BINDING_REGISTRY_V2_TABLE_NAME", authorizer)
-        self.assertRegex(
+            with self.subTest(function_name=function_name):
+                self.assertNotIn("SERVICE_BINDING_REGISTRY_V2_", function_block)
+                self.assertNotIn(TABLE_NAME, function_block)
+                self.assertNotIn(BINDING_KEY, function_block)
+                self.assertNotIn("ServiceBindingRegistryV2", function_block)
+
+        self.assertNotIn("ApiProxyFunctionRoleArn:", template)
+        self.assertNotIn(
+            "Exact API Proxy execution role ARN for the THN registry resource policy.",
             template,
-            re.compile(
-                r"ApiProxyFunctionRoleArn:\s+"
-                r"Description:.*?\s+Value:\s+Fn::GetAtt:\s+"
-                r"- ApiProxyFunctionRole\s+- Arn",
-                re.S,
-            ),
         )
 
 
