@@ -76,6 +76,79 @@ Parameters:
     Default: INFO
     AllowedValues: [DEBUG, INFO, WARNING, ERROR]
     Description: Log level for the Lambda.
+  EnableThnAuthRuntimeV2:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: Fail-closed opt-in for the isolated The Hair Narrative TEST runtime auth endpoint.
+  ThnAuthRuntimeV2DescriptorVersionId:
+    Type: String
+    Default: BLOCKED
+    AllowedPattern: '^(BLOCKED|[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$'
+    Description: Immutable active THN service-binding descriptor version.
+  ThnAuthRuntimeV2DescriptorSha256:
+    Type: String
+    Default: '0000000000000000000000000000000000000000000000000000000000000000'
+    AllowedPattern: '^[a-f0-9]{64}$'
+    Description: SHA-256 of the reviewed active THN service-binding descriptor.
+  ThnAuthRuntimeV2AuthPolicyVersion:
+    Type: String
+    Default: BLOCKED
+    AllowedPattern: '^(BLOCKED|[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$'
+    Description: Immutable THN journal-owner authorization-policy version.
+  ThnAuthRuntimeV2CognitoUserPoolId:
+    Type: String
+    Default: BLOCKED
+    AllowedPattern: '^(BLOCKED|us-east-1_[A-Za-z0-9]+)$'
+    Description: Public identifier of the dedicated TEST Auth Admin v2 user pool.
+  ThnAuthRuntimeV2CognitoClientId:
+    Type: String
+    Default: BLOCKED
+    AllowedPattern: '^(BLOCKED|[a-z0-9]{1,128})$'
+    Description: Public identifier of the dedicated TEST Auth Admin v2 app client.
+
+Rules:
+  ThnAuthRuntimeV2ActivationRule:
+    RuleCondition:
+      Fn::Equals:
+        - Ref: EnableThnAuthRuntimeV2
+        - 'true'
+    Assertions:
+      - Assert:
+          Fn::Equals:
+            - Ref: AuthRuntimeEnvironment
+            - test
+        AssertDescription: THN auth runtime v2 is TEST-only.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: ThnAuthRuntimeV2DescriptorVersionId
+                - BLOCKED
+        AssertDescription: A reviewed descriptor version is required before enabling THN auth runtime v2.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: ThnAuthRuntimeV2DescriptorSha256
+                - '0000000000000000000000000000000000000000000000000000000000000000'
+        AssertDescription: A reviewed descriptor digest is required before enabling THN auth runtime v2.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: ThnAuthRuntimeV2AuthPolicyVersion
+                - BLOCKED
+        AssertDescription: A reviewed authorization policy is required before enabling THN auth runtime v2.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: ThnAuthRuntimeV2CognitoUserPoolId
+                - BLOCKED
+        AssertDescription: The dedicated TEST Cognito user pool must exist before enabling THN auth runtime v2.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: ThnAuthRuntimeV2CognitoClientId
+                - BLOCKED
+        AssertDescription: The dedicated TEST Cognito app client must exist before enabling THN auth runtime v2.
 
 Globals:
   Function:
@@ -89,9 +162,25 @@ Conditions:
     Fn::Equals:
       - Ref: AuthProvisioningStateTableMode
       - create
+  IsThnAuthRuntimeV2Enabled:
+    Fn::And:
+      - Fn::Equals:
+          - Ref: AuthRuntimeEnvironment
+          - test
+      - Fn::Equals:
+          - Ref: EnableThnAuthRuntimeV2
+          - 'true'
 Resources:
   ApiProxyApi:
     Type: AWS::Serverless::Api
+    Metadata:
+      cfn-lint:
+        config:
+          # SAM renders a condition around the two v2 operations in this shared
+          # API. W1028 incorrectly treats the deliberate AWS::NoValue branch as
+          # unreachable; the function and both operations share the same gate.
+          ignore_checks:
+            - W1028
     Properties:
       # Keep this literal for the existing production stack. Parameterizing it
       # changes SAM-generated logical IDs and tries to replace the live Prod stage.
@@ -325,6 +414,67 @@ Resources:
             Path: /auth/provisioning-plan
             Method: OPTIONS
 
+  ThnAuthRuntimeV2Function:
+    Type: AWS::Serverless::Function
+    Condition: IsThnAuthRuntimeV2Enabled
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: thn_auth_runtime_v2.lambda_handler
+      Description: Read-only TEST runtime auth discovery for the isolated The Hair Narrative admin origin.
+      AutoPublishAlias: test
+      Environment:
+        Variables:
+          SERVICE_BINDING_REGISTRY_V2_TABLE_NAME: zoolanding-content-hub-test-ServiceBindingRegistryV2
+          THN_AUTH_RUNTIME_V2_DESCRIPTOR_VERSION_ID:
+            Ref: ThnAuthRuntimeV2DescriptorVersionId
+          THN_AUTH_RUNTIME_V2_DESCRIPTOR_SHA256:
+            Ref: ThnAuthRuntimeV2DescriptorSha256
+          THN_AUTH_RUNTIME_V2_AUTH_POLICY_VERSION:
+            Ref: ThnAuthRuntimeV2AuthPolicyVersion
+          THN_AUTH_RUNTIME_V2_AWS_PARTITION:
+            Ref: AWS::Partition
+          THN_AUTH_RUNTIME_V2_AWS_ACCOUNT_ID:
+            Ref: AWS::AccountId
+          THN_AUTH_RUNTIME_V2_AWS_REGION:
+            Ref: AWS::Region
+          THN_AUTH_RUNTIME_V2_AWS_URL_SUFFIX:
+            Ref: AWS::URLSuffix
+          THN_AUTH_RUNTIME_V2_COGNITO_USER_POOL_ID:
+            Ref: ThnAuthRuntimeV2CognitoUserPoolId
+          THN_AUTH_RUNTIME_V2_COGNITO_CLIENT_ID:
+            Ref: ThnAuthRuntimeV2CognitoClientId
+          LOG_LEVEL:
+            Ref: LogLevel
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ForAllValues:StringEquals:
+                  dynamodb:LeadingKeys:
+                    - SERVICE_BINDING#test#thn-journal-test-v2
+      Events:
+        ThnAuthRuntimeV2Get:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth-v2/runtime-config
+            Method: GET
+        ThnAuthRuntimeV2Post:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiProxyApi
+            Path: /auth-v2/runtime-config
+            Method: POST
+
   AuthProvisioningStateTable:
     Type: AWS::DynamoDB::Table
     Condition: CreateAuthProvisioningStateTable
@@ -505,6 +655,11 @@ Outputs:
     Description: Public runtime auth config endpoint URL.
     Value:
       Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/auth/runtime-config
+  ThnAuthRuntimeV2Endpoint:
+    Condition: IsThnAuthRuntimeV2Enabled
+    Description: Dedicated TEST-only The Hair Narrative runtime auth config endpoint URL.
+    Value:
+      Fn::Sub: https://${ApiProxyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/auth-v2/runtime-config
   AuthProvisioningPlanEndpoint:
     Description: Server-only plan-only auth provisioning endpoint URL.
     Value:

@@ -65,6 +65,8 @@ Active profiles return the same public `runtime.auth` shape that the Angular app
 
 Inactive profiles return the same public shape with `enabled: false`; profile status and provisioning details stay server-only. Runtime-config rejects browser-supplied secret or policy fields; only `domain` and `authProfileId` are accepted in this public request. Browser requests are origin-bound: a public draft origin can request only its own domain, or a canonical domain when the origin is a managed alias proven by server-only registry metadata. `test.zoolandingpage.com.mx` and local QA origins can preview other domains.
 
+`GET|POST /auth-v2/runtime-config` is a separate, default-off TEST-only contract for The Hair Narrative. It accepts exactly `domain=thehairnarrative.com` and `authProfileId=journal-owner`, requires the dedicated admin origin and CloudFront-overwritten forwarded host, and strongly reads the exact `SERVICE_BINDING#test#thn-journal-test-v2` registry record. A missing, inactive, stale, malformed, or mismatched binding returns one generic no-store unavailable response. The browser response contains only public Cognito identifiers plus same-origin `/auth-v2/session/*` routes and safe CSRF cookie/header names. It must not contain tenant identifiers, writer mode/epoch, registry revision, descriptor coordinates, resource bindings, account purpose, session version, credentials, cookies, TOTP material, or v1 `/auth/*` paths. The minimal v2 artifact contains only `thn_auth_runtime_v2.py` and `service_binding_registry_consumer_v2.py`; all v1 functions remain unbound to the THN registry.
+
 `POST /auth/provisioning-plan`
 
 ```json
@@ -258,6 +260,7 @@ The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` and decla
 - A single draft/site can optionally configure one or more auth profiles.
 - Public auth runtime config exposes only safe public metadata and never exposes client secrets or social IdP secret refs.
 - Public auth runtime config rejects browser origins that do not belong to the requested domain or a proven managed alias for that domain.
+- The isolated THN runtime endpoint is absent by default, is valid only in `test`, uses one exact strongly consistent registry read, and never falls back to v1 paths or policy.
 - Server-only provisioning plans are denied by default and expose stable operation/idempotency keys for the executor.
 - Server-only provisioning executor dry-run returns sanitized previews and audit keys without secret refs; apply remains closed unless explicitly enabled by deploy-time feature flag and allowlists.
 - The reusable JWT request authorizer can protect future blogs, dashboards, uploads, and mutable actions using the same server-only registry policy.
@@ -274,6 +277,7 @@ The JWT authorizer is exposed as `auth_service.jwt_authorizer_handler` and decla
 
 - This repo creates only placeholder Secrets Manager entries; it does not store, generate, or rotate real upstream credential values.
 - This repo does not deploy itself automatically.
+- The default and `test` SAM parameter sets do not enable the THN v2 runtime endpoint; activation requires a separate reviewed TEST-only workflow and immutable inputs.
 - This repo does not expose `server/integrations.json` through runtime-read.
 - This repo does not create Cognito user pools, app clients, domains, Google/Facebook IdPs, or extra auth IAM roles unless an approved deploy/provisioning step enables apply and provides the required allowlists and secrets. The SAM stack does publish the reusable API Gateway JWT request authorizer used by future protected routes.
 - Cognito apply is non-destructive in v1: it creates/updates required resources and records state, but it does not delete Cognito resources.
