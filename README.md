@@ -93,6 +93,44 @@ The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy
 
 Do not enable `EnableThnAuthRuntimeV2` through either ordinary SAM environment. A dedicated TEST activation workflow must first resolve the immutable descriptor coordinates and the dedicated Auth Admin v2 user-pool/client public identifiers, verify the Content Hub registry dependency and rollback target, and then deploy the reviewed full-SHA artifact. No production value is valid for this gate.
 
+
+## Isolated THN TEST release selection
+
+The immutable TEST deploy and rollback workflows accept the optional environment
+variable `THN_V2_TEST_PARAMETERS_JSON`. Omission preserves their previous
+parameter maps exactly, including disabled THN defaults. Ordinary SAM configuration
+remains unchanged; this is not an instruction to activate it through `sam deploy`.
+
+A supplied selection is a closed JSON object with `schemaVersion: 1`,
+`environment: "test"`, and `parameters` containing exactly the six keys returned
+by `_thn_defaults()` in `tools/prepare_test_parameters.py`. Partial selections,
+unknown or shared parameters, duplicate keys, malformed identifiers, placeholders
+for an enabled runtime, and input above 16 KiB are rejected before credentials.
+The selection cannot change v1 provisioning, grants, notifications, registry
+activation, user accounts, writer mode, or writer epoch.
+
+After AWS credentials are configured, the same packaged tool performs a read-only
+preflight before any change set. It verifies the deployment account and requires
+`us-east-1`; a supplied configuration cannot select another account or region.
+An enabled runtime also requires the dedicated Auth Admin TEST stack to be
+stable and termination-protected. Its exact pool and client logical resources
+must match the supplied public identifiers, and the authoritative Content Hub
+TEST registry table must exist. The preflight does not create or activate these
+dependencies or read customer records.
+
+No workflow dispatch, deployment, account provisioning, or activation is implied
+by this tooling. The remaining service, immutable recovery, editorial, and
+integration gates must still pass. A prior rollback artifact must contain this
+selection/preflight contract; older artifacts cannot silently stand in for it.
+For a supplied THN selection, the workflows require the packaged tool to report
+`thn-test-selection/v1` before credentials. A legacy tool without that capability
+fails the release instead of silently ignoring the selection. With no THN
+selection, the compatibility check is skipped and the prior path is unchanged.
+Changing an already-enabled runtime to disabled removes conditional resources
+and remains blocked by the unchanged no-removal change-set guard. This parameter
+selection is not a verified recovery transition; that path requires separate
+review before activation.
+
 ## Credential Placeholder Workflow
 
 Credential values are not stored in this repository. New credentials should use SSM SecureString parameters under `/${credentialRef}`. To add a new API credential, add only the credential reference, required JSON field names, and non-sensitive tags to `secret-placeholders/credential-placeholders.json`, then create missing placeholders:
