@@ -161,6 +161,7 @@ jobs:
         shell: bash
         env:
           STACK_NAME: zoolanding-api-proxy-test
+          AWS_CLOUDFORMATION_ROLE_ARN: ${{ vars.AWS_CLOUDFORMATION_ROLE_ARN }}
           CHANGE_SET_NAME: rollback-${{ github.run_id }}-${{ github.run_attempt }}
           RELEASE_SHA: ${{ inputs.source_sha }}
           ARTIFACTS_BUCKET: ${{ vars.SAM_ARTIFACTS_BUCKET }}

@@ -11,6 +11,16 @@ set -euo pipefail
 : "${AWS_REGION:?AWS_REGION is required}"
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
 : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
+: "${AWS_CLOUDFORMATION_ROLE_ARN:?CloudFormation execution role is required}"
+
+if [[ ! "$AWS_CLOUDFORMATION_ROLE_ARN" =~ ^arn:aws:iam::([0-9]{12}):role/zoolanding-deployer-api-proxy-test-cfn-exec$ ]]; then
+  echo "cloudformation_role_invalid"
+  exit 1
+fi
+role_account="${BASH_REMATCH[1]}"
+test "$AWS_REGION" = "us-east-1"
+test "$STACK_NAME" = "zoolanding-api-proxy-test"
+test "$role_account" = "$(aws sts get-caller-identity --query Account --output text --no-cli-pager)"
 
 if [[ ! "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
   echo "release_sha_invalid"
@@ -26,7 +36,7 @@ test -f "$reviewer_path"
 packaged="$RUNNER_TEMP/packaged-template.yaml"
 description="$RUNNER_TEMP/reviewed-change-set.json"
 lookup_error="$RUNNER_TEMP/stack-lookup.err"
-prefix_root="${ARTIFACT_PREFIX_ROOT:-test-releases}"
+prefix_root="$STACK_NAME"
 if [[ ! "$prefix_root" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ || "$prefix_root" == *".."* ]]; then
   echo "artifact_prefix_root_invalid"
   exit 1
@@ -72,6 +82,7 @@ create_args=(
   --description "GitHub ${GITHUB_REPOSITORY}@${RELEASE_SHA}"
   --template-url "$template_url"
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+  --role-arn "$AWS_CLOUDFORMATION_ROLE_ARN"
   --parameters "file://$PARAMETER_FILE"
   --query Id
   --output text
