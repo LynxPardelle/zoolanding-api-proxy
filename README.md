@@ -73,6 +73,14 @@ Then point the Angular dev server proxy at `http://127.0.0.1:5055`. The local au
 
 ## Deploy
 
+The ordinary TEST workflow accepts only a non-forced two-parent merge from the
+current `dev` tip into `test`: its first parent must equal the push's previous
+TEST SHA, its second parent must equal fetched `dev`, and its complete tree must
+match `dev`. Direct pushes, squash/octopus merges, stale or substituted sources,
+and `main` promotions are rejected before AWS credentials. Production and the
+immutable artifact, rollback, identity and state-retention guards are unchanged.
+Source integration into `dev` is not a deployment or activation.
+
 Do not deploy or create secrets until the frontend and policy contract are reviewed.
 
 The auth provisioning rollout, post-deploy smoke plan, and future real Cognito apply design are documented in [docs/auth-provisioning-rollout-and-apply-plan.md](docs/auth-provisioning-rollout-and-apply-plan.md). That document is planning-only unless a future task explicitly approves deploy/AWS/Cognito execution.

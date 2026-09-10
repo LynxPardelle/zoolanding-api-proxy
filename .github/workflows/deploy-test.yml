@@ -47,15 +47,15 @@ jobs:
           [[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo "release_sha_invalid"; exit 1; }
           test "$GITHUB_REF" = "refs/heads/test"
           test "$PUSH_FORCED" != "true"
-          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin refs/heads/dev:refs/remotes/origin/dev
           read -r commit first_parent second_parent extra < <(git rev-list --parents -n 1 HEAD)
           test -n "$commit"
           test -n "$first_parent"
           test -n "$second_parent"
           test -z "${extra:-}"
           test "$first_parent" = "$BEFORE_SHA"
-          test "$second_parent" = "$(git rev-parse refs/remotes/origin/main)"
-          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse 'refs/remotes/origin/main^{tree}')"
+          test "$second_parent" = "$(git rev-parse refs/remotes/origin/dev)"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse 'refs/remotes/origin/dev^{tree}')"
       - name: Test, validate, and build exact source
         shell: bash
         run: |
