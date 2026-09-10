@@ -10,12 +10,15 @@ The Angular app calls:
 - `POST /auth/signin`, `/auth/signup`, `/auth/confirm-signup`, `/auth/resend-confirmation`, `/auth/forgot-password`, and `/auth/confirm-forgot-password` for optional custom generic auth forms.
 - `POST /auth/provisioning-plan` for server-only, plan-only Cognito provisioning output.
 - `POST /auth/provisioning-executor` for server-only Cognito executor dry-run and guarded apply.
+- `GET` or `POST /auth-v2/runtime-config` for the isolated, TEST-only The Hair Narrative Journal owner runtime metadata when its explicit deployment gate is enabled.
 
 The browser sends only `domain`, optional `pageId`, `sourceId` or `actionId`, and allowlisted input values. It never sends upstream URLs or credentials. The Lambda resolves the published server-only policy from `server/integrations.json`, loads credentials by `credentialRef` from SSM SecureString, calls the upstream API, filters the response, and returns safe JSON.
 
 Auth profiles are resolved from the published server-only file `server/auth-profile-registry.json`. The runtime auth endpoint accepts only `domain` and `authProfileId`, enforces that the browser `Origin` belongs to the requested domain or to a managed alias for that domain, then returns the same public `runtime.auth` shape validated by the Angular app. Requests from the shared testing host or a configured environment alias resolve `publishedEnvironments.test` instead of production `published`, so testing can exercise draft auth changes without changing production auth policy. Active profiles return `enabled: true`; planned, provisioning, suspended, and failed profiles return the same secret-free public metadata with `enabled: false`. The provisioning endpoint is denied by default, accepts only `domain` and `authProfileId`, and returns only a server-only, plan-only contract when the caller's signed IAM role is explicitly allowlisted by `AUTH_PROVISIONING_ALLOWED_ROLE_NAMES` or `AUTH_PROVISIONING_ALLOWED_ROLE_ARNS`.
 
 Public runtime auth session metadata may include same-origin BFF paths such as sign-in, account, logout, MFA challenge, voluntary MFA enrollment, voluntary MFA disablement, and admin-managed MFA reset paths. These fields are only routing metadata for Angular; Cognito tokens, tenant/group policy, TOTP setup secrets, and auth-admin state remain server-only.
+
+The Hair Narrative v2 runtime endpoint is a separate Lambda and does not import or modify the shared v1 handlers. It accepts only the exact `thehairnarrative.com` and `journal-owner` coordinates from `https://admin-test.thehairnarrative.com`, then strongly reads the one Content-Hub-owned registry item. Its response uses only the closed `/auth-v2/session/*` paths and deterministic browser-readable CSRF names; tenant data, writer state, registry revisions, descriptor hashes, account purpose, session versions, cookies, tokens, and TOTP material are never returned. The Lambda and its two API operations are excluded unless `EnableThnAuthRuntimeV2=true`, `AuthRuntimeEnvironment=test`, and reviewed descriptor/Cognito public identifiers are supplied. Both default and test SAM environments therefore remain disabled until the dedicated activation workflow is reviewed.
 
 Custom auth form endpoints are optional per auth profile. They require the server-only profile to be active and to enable the matching `customAuth` policy before calling Cognito. Browser requests may send only public form inputs such as email, password, confirmation code, language, `domain`, and `authProfileId`; tenant claims, default groups, user pool IDs, billing boundaries, and runtime environment are resolved from the server-only profile and Lambda stack. The signup endpoint can set the configured tenant claim, optionally set the configured environment claim such as `custom:zoolanding_env`, and add only server-approved default groups from `allowedGroups`. Signin uses Cognito `USER_PASSWORD_AUTH` and returns only sanitized public session metadata after JWT issuer/audience/tenant/environment/group validation; it does not return ID, access, or refresh tokens. Responses return sanitized statuses and code-delivery metadata only.
 
@@ -36,6 +39,7 @@ The SAM stack also publishes `DraftJwtRequestAuthorizer`, a reusable API Gateway
 - S3 bucket: `zoolanding-config-payloads`
 - SSM Parameter Store SecureString for `credentialRef` values
 - API Gateway: `POST /api-proxy/read`, `POST /api-proxy/action`, `GET|POST /auth/runtime-config`, `POST /auth/provisioning-plan`, `POST /auth/provisioning-executor`, and the reusable `DraftJwtRequestAuthorizer`. The executor route must remain IAM-authorized.
+- TEST-only, default-off API Gateway operations: `GET|POST /auth-v2/runtime-config`, backed by a separate minimal Lambda with exact-key `GetItem` access to `zoolanding-content-hub-test-ServiceBindingRegistryV2`.
 - Cognito public app-client APIs for optional custom auth forms: InitiateAuth, SignUp, ConfirmSignUp, ResendConfirmationCode, ForgotPassword, ConfirmForgotPassword, plus AdminAddUserToGroup for server-approved signup default groups.
 - Cognito provisioning executor API for optional TOTP MFA reconciliation: SetUserPoolMfaConfig.
 - Cognito custom user attribute `custom:zoolanding_env` or a profile-specific equivalent when a draft shares one user pool across testing and production users.
@@ -86,6 +90,46 @@ sam deploy --config-env test
 ```
 
 The checked-in `samconfig.toml` targets `us-east-1`, stack `zoolanding-api-proxy` for production and `zoolanding-api-proxy-test` for testing. Both expose a `/Prod` API Gateway stage, but they remain isolated by stack name, API ID, Lambda environment variables, CORS, and `AUTH_RUNTIME_ENVIRONMENT`. Localhost and 127.0.0.1 origins are accepted by the Lambda for local QA only. Published draft domains are accepted dynamically from the config registry, so adding a new draft domain does not require editing the API Gateway/Lambda CORS parameter.
+
+Do not enable `EnableThnAuthRuntimeV2` through either ordinary SAM environment. A dedicated TEST activation workflow must first resolve the immutable descriptor coordinates and the dedicated Auth Admin v2 user-pool/client public identifiers, verify the Content Hub registry dependency and rollback target, and then deploy the reviewed full-SHA artifact. No production value is valid for this gate.
+
+
+## Isolated THN TEST release selection
+
+The immutable TEST deploy and rollback workflows accept the optional environment
+variable `THN_V2_TEST_PARAMETERS_JSON`. Omission preserves their previous
+parameter maps exactly, including disabled THN defaults. Ordinary SAM configuration
+remains unchanged; this is not an instruction to activate it through `sam deploy`.
+
+A supplied selection is a closed JSON object with `schemaVersion: 1`,
+`environment: "test"`, and `parameters` containing exactly the six keys returned
+by `_thn_defaults()` in `tools/prepare_test_parameters.py`. Partial selections,
+unknown or shared parameters, duplicate keys, malformed identifiers, placeholders
+for an enabled runtime, and input above 16 KiB are rejected before credentials.
+The selection cannot change v1 provisioning, grants, notifications, registry
+activation, user accounts, writer mode, or writer epoch.
+
+After AWS credentials are configured, the same packaged tool performs a read-only
+preflight before any change set. It verifies the deployment account and requires
+`us-east-1`; a supplied configuration cannot select another account or region.
+An enabled runtime also requires the dedicated Auth Admin TEST stack to be
+stable and termination-protected. Its exact pool and client logical resources
+must match the supplied public identifiers, and the authoritative Content Hub
+TEST registry table must exist. The preflight does not create or activate these
+dependencies or read customer records.
+
+No workflow dispatch, deployment, account provisioning, or activation is implied
+by this tooling. The remaining service, immutable recovery, editorial, and
+integration gates must still pass. A prior rollback artifact must contain this
+selection/preflight contract; older artifacts cannot silently stand in for it.
+For a supplied THN selection, the workflows require the packaged tool to report
+`thn-test-selection/v1` before credentials. A legacy tool without that capability
+fails the release instead of silently ignoring the selection. With no THN
+selection, the compatibility check is skipped and the prior path is unchanged.
+Changing an already-enabled runtime to disabled removes conditional resources
+and remains blocked by the unchanged no-removal change-set guard. This parameter
+selection is not a verified recovery transition; that path requires separate
+review before activation.
 
 ## Credential Placeholder Workflow
 
