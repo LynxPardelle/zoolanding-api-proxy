@@ -44,10 +44,10 @@ class TestDeliveryWorkflowContractTests(unittest.TestCase):
         workflow = self.workflow("deploy-test.yml")
         self.assertIn("branches: [test]", workflow)
         self.assertIn(
-            "refs/heads/main:refs/remotes/origin/main",
+            "refs/heads/dev:refs/remotes/origin/dev",
             workflow,
         )
-        self.assertNotIn("refs/remotes/origin/dev", workflow)
+        self.assertNotIn("refs/remotes/origin/main", workflow)
         self.assertIn("${{ github.sha }}", workflow)
         self.assertRegex(workflow, r"\^\[a-f0-9\]\{40\}\$")
         self.assert_release_boundary(workflow)
