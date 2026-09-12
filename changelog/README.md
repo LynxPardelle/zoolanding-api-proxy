@@ -10,6 +10,13 @@ Keep new entries chronological, scoped to one change or operational pass, and ti
 
 ## Dedicated entries
 
+- [2026-09-12 — Isolated first THN TEST provisioning](2026-09-12-thn-first-runtime-provisioning.md)
+- [2026-09-12 — Retained THN TEST runtime route controller](2026-09-12-thn-retained-runtime-routes.md)
+- [2026-09-12 — Explicit AWS-observed TEST code recovery](2026-09-12-aws-observed-recovery.md)
+- [2026-09-04 — TEST delivery and immutable rollback hardening](2026-09-04-test-delivery-hardening.md)
+- [2026-09-07 — Isolated THN TEST selection and preflight](2026-09-07-thn-test-selection.md)
+- [2026-09-04 — THN auth runtime v2 build boundary](2026-09-04-thn-auth-runtime-v2.md)
+- [2026-08-31 — THN registry v2 live revision contract](2026-08-31-thn-registry-v2-live-revision.md)
 - [2026-06-09 — Auth provisioning rollout and apply plan](2026-06-09-auth-provisioning-rollout-apply-plan.md)
 - [2026-06-09 — Auth Cognito executor scaffold](2026-06-09-auth-cognito-executor-scaffold.md)
 - [2026-06-09 — Auth provisioning production deploy](2026-06-09-auth-provisioning-production-deploy.md)
