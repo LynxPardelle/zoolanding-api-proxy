@@ -73,6 +73,11 @@ Then point the Angular dev server proxy at `http://127.0.0.1:5055`. The local au
 
 ## Deploy
 
+The separate [retained THN TEST route controller](docs/thn-retained-runtime-routes.md)
+closes/restores only the captured v2 runtime operations while retaining all
+existing resources. It defaults to verification, is not ordinary deployment,
+and requires its own private capture and reviewed permissions before use.
+
 The ordinary TEST workflow accepts only a non-forced two-parent merge from the
 current `dev` tip into `test`: its first parent must equal the push's previous
 TEST SHA, its second parent must equal fetched `dev`, and its complete tree must
@@ -138,6 +143,16 @@ Changing an already-enabled runtime to disabled removes conditional resources
 and remains blocked by the unchanged no-removal change-set guard. This parameter
 selection is not a verified recovery transition; that path requires separate
 review before activation.
+
+## Explicit AWS-observed recovery
+
+The separate dispatch-only [AWS-observed recovery contract](docs/aws-live-snapshot-recovery.md)
+restores only the exact approved original versioned shared code package, without
+inventing historical Git provenance. It pins current tooling independently,
+preserves current parameters/resources/IAM, defaults to verification, and never
+publishes raw recovery records. Existing GitHub release/rollback checks are
+unchanged. Private-channel and existing-role permissions must be verified before
+execution; this code-only path does not disable an enabled THN runtime.
 
 ## Credential Placeholder Workflow
 
