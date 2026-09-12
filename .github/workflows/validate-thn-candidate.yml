@@ -3,7 +3,7 @@ name: Validate THN candidate (no deploy)
 
 on:
   push:
-    branches: ['codex/thn-task029-api-proxy']
+    branches: ['codex/thn-task029-api-proxy', 'codex/thn-first-provisioning-20260912']
 
 permissions:
   contents: read
@@ -45,8 +45,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3==1.43.84
-          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check -r requirements-test.txt
           python -m pip check
           python -m unittest discover -s tests -p 'test_*.py'
           sam validate --lint

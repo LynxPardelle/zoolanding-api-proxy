@@ -73,6 +73,12 @@ Then point the Angular dev server proxy at `http://127.0.0.1:5055`. The local au
 
 ## Deploy
 
+The [isolated first THN TEST provisioning path](docs/thn-first-runtime-provisioning.md)
+promotes exact source without ordinary deployment, then verifies/applies only
+the native THN extension through its own private plan. It does not adopt a
+service role or rebuild shared Lambda packages. This is distinct from enabling
+THN through the ordinary SAM parameter selection below.
+
 The separate [retained THN TEST route controller](docs/thn-retained-runtime-routes.md)
 closes/restores only the captured v2 runtime operations while retaining all
 existing resources. It defaults to verification, is not ordinary deployment,

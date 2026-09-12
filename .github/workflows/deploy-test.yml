@@ -21,6 +21,7 @@ jobs:
       AWS_REGION: us-east-1
       SAM_CLI_TELEMETRY: 0
     outputs:
+      promotion_mode: ${{ steps.promotion.outputs.mode }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_name: ${{ steps.identity.outputs.name }}
       manifest_digest: ${{ steps.manifest.outputs.digest }}
@@ -28,6 +29,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
@@ -56,17 +58,35 @@ jobs:
           test "$first_parent" = "$BEFORE_SHA"
           test "$second_parent" = "$(git rev-parse refs/remotes/origin/dev)"
           test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse 'refs/remotes/origin/dev^{tree}')"
+      - name: Classify exact reviewed TEST promotion
+        id: promotion
+        shell: bash
+        env:
+          API_TEST_PROMOTION_SELECTION_JSON: ${{ vars.API_TEST_PROMOTION_SELECTION_JSON }}
+        run: |
+          set -euo pipefail
+          PROMOTED_DEV_SHA="$(git rev-parse refs/remotes/origin/dev)"
+          PROMOTED_DEV_TREE="$(git rev-parse 'refs/remotes/origin/dev^{tree}')"
+          PROMOTED_TEST_BASE_SHA="$(git rev-parse HEAD^1)"
+          export PROMOTED_DEV_SHA PROMOTED_DEV_TREE PROMOTED_TEST_BASE_SHA
+          mode="$(python tools/classify_test_promotion.py)"
+          case "$mode" in
+            legacy|thn-source-only) ;;
+            *) echo "promotion_mode_invalid"; exit 1 ;;
+          esac
+          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Test, validate, and build exact source
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check -r requirements-test.txt
           python -m pip check
           python -m unittest discover -s tests -p "test_*.py"
           sam validate
           sam build --no-cached
           :
       - name: Assemble immutable release artifact
+        if: steps.promotion.outputs.mode == 'legacy'
         shell: bash
         env:
           RELEASE_SHA: ${{ github.sha }}
@@ -96,6 +116,7 @@ jobs:
           PY
           (cd .aws-sam/build && LC_ALL=C find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > .aws-sam/build-manifest.sha256
       - name: Compute release identity
+        if: steps.promotion.outputs.mode == 'legacy'
         id: manifest
         shell: bash
         run: |
@@ -104,12 +125,14 @@ jobs:
           [[ "$digest" =~ ^[a-f0-9]{64}$ ]] || { echo "manifest_digest_invalid"; exit 1; }
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
       - name: Define artifact name
+        if: steps.promotion.outputs.mode == 'legacy'
         id: identity
         shell: bash
         env:
           ARTIFACT_NAME: zoolanding-api-proxy-test-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
         run: printf 'name=%s\n' "$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
       - name: Upload exact validated artifact
+        if: steps.promotion.outputs.mode == 'legacy'
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -124,6 +147,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: validate
+    if: needs.validate.outputs.promotion_mode == 'legacy'
     environment: test
     permissions:
       contents: read
