@@ -40,7 +40,9 @@ def package(entries=None):
         warnings.simplefilter("ignore", UserWarning)
         for name, body in entries or [("lambda_function.py", b"old original bytes\n"),
                                       ("auth_service.py", b"old auth bytes\n")]:
-            archive.writestr(name, body)
+            # Keep explicit malicious ZipInfo fixtures intact; ordinary entries are reproducible.
+            entry = name if isinstance(name, zipfile.ZipInfo) else zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            archive.writestr(entry, body)
     return result.getvalue()
 
 
@@ -211,6 +213,13 @@ class AwsLiveSnapshotTests(unittest.TestCase):
                                      APPROVED_VERSION_SHA256=digest(self.aws.version.encode()))
         self.policy.start()
         self.addCleanup(self.policy.stop)
+
+    def test_synthetic_package_bytes_do_not_depend_on_wall_clock(self):
+        with patch("zipfile.time.localtime", return_value=(2026, 9, 12, 12, 0, 0, 5, 255, 0)):
+            first = SyntheticAWS().body
+        with patch("zipfile.time.localtime", return_value=(2026, 9, 12, 12, 0, 4, 5, 255, 0)):
+            second = SyntheticAWS().body
+        self.assertEqual(first, second, "recreated recovery fixtures must preserve exact ZIP bytes across clock ticks")
 
     def capture(self):
         return self.api.capture(self.aws, TOOLING)
