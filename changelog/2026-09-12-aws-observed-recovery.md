@@ -28,3 +28,12 @@ approved private publication remain required. Enabled-to-disabled retained-state
 recovery remains an explicit, unimplemented separate design boundary.
 
 See the [owning guide](../docs/aws-live-snapshot-recovery.md) for the exact contract.
+
+## Recovery fixture timestamp correction
+
+The source-only TEST run exposed nondeterministic ZIP timestamps in a recreated
+synthetic recovery fixture. A regression using two controlled clock values
+failed before the helper fix. Ordinary synthetic entries now use a fixed ZIP
+timestamp, while explicit ZipInfo entries preserve the malicious metadata used
+by traversal/duplicate/symlink rejection tests. Production recovery hashes,
+runtime code, workflows, IAM and deployment artifacts are unchanged.
