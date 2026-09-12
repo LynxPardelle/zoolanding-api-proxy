@@ -1,6 +1,9 @@
 name: Retained THN Routes Test
 
 on:
+  # Discovery only; every operational job remains manual-only.
+  push:
+    branches: [codex/thn-first-provisioning-20260912]
   workflow_dispatch:
     inputs:
       operation:
@@ -40,7 +43,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  register:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - run: echo 'TEST manual workflow registered. No checkout, environment, artifact or AWS credentials.'
+
   transition:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: test
