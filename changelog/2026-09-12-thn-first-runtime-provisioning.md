@@ -15,3 +15,16 @@ Local implementation, not deployed activation:
   claim is made by this source change. Those need separate accepted operations.
 
 Current procedure: [first provisioning](../docs/thn-first-runtime-provisioning.md).
+
+## Manual workflow registration follow-up
+
+- Added a no-credential registration job on the existing delivery branch for
+  recovery, first provisioning, and retained route operations. Every operational
+  job now explicitly requires `workflow_dispatch`; its prior steps, permissions,
+  inputs, concurrency, environment and immutable-source checks remain unchanged.
+- Added regression checks for the exact registration branch, closed harmless
+  registration job, and manual-only operational jobs. This reuses the existing
+  Auth/Content Hub registration pattern without changing the default branch.
+- Local verification: 265 tests, including two unchanged Windows skips;
+  Actionlint, SAM lint, and a fresh SAM build passed. No AWS operation, TEST
+  promotion, or runtime activation is implied by this registration change.
