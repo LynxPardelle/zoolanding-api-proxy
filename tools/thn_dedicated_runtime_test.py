@@ -15,6 +15,7 @@ import os
 import re
 from pathlib import Path
 import zipfile
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -47,10 +48,10 @@ def _require(value: bool, message: str) -> None:
         raise ValueError(message)
 
 
-def validate_context(values: dict[str, str], expected_account: str) -> str:
+def validate_context(values: Mapping[str, str], expected_account: str) -> str:
     """Reject a non-TEST or substituted GitHub run before credentials are assumed."""
 
-    _require(isinstance(values, dict) and re.fullmatch(r"[0-9]{12}", expected_account or "")
+    _require(isinstance(values, Mapping) and re.fullmatch(r"[0-9]{12}", expected_account or "")
              and values.get("GITHUB_REPOSITORY") == "LynxPardelle/zoolanding-api-proxy"
              and values.get("GITHUB_REF") == "refs/heads/test"
              and values.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
@@ -378,8 +379,10 @@ def run_workflow(operation: str, values: dict[str, str]) -> str:
     recovery.closed(reference, {"bucket", "key", "versionId"})
     _require(reference["bucket"] == values["SAM_ARTIFACTS_BUCKET"]
              and isinstance(reference["key"], str)
-             and re.fullmatch(r"zoolanding-api-proxy-test/first-provisioning/[A-Za-z0-9_/-]+\.json",
-                              reference["key"]) is not None
+             and reference["key"].startswith("zoolanding-api-proxy-test/first-provisioning/")
+             and reference["key"].endswith(".json")
+             and 0 < len(reference["key"]) <= 1024
+             and re.fullmatch(r"[\x21-\x7e]+", reference["key"]) is not None
              and not any(part in {"", ".", ".."} for part in reference["key"].split("/"))
              and isinstance(reference["versionId"], str)
              and re.fullmatch(r"[A-Za-z0-9_.+/-]{1,1024}", reference["versionId"]) is not None
