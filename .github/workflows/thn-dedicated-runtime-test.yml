@@ -17,10 +17,6 @@ on:
         description: Reviewed SHA-256 of the dedicated SAM template
         type: string
         required: true
-      plan_sha256:
-        description: Reviewed SHA-256 of the private canonical release plan
-        type: string
-        required: true
 
 permissions:
   contents: read
@@ -44,7 +40,6 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       SOURCE_SHA: ${{ inputs.source_sha }}
       THN_TEMPLATE_SHA256: ${{ inputs.template_sha256 }}
-      THN_PLAN_SHA256: ${{ inputs.plan_sha256 }}
       SAM_ARTIFACTS_BUCKET: ${{ vars.SAM_ARTIFACTS_BUCKET }}
       AWS_CLOUDFORMATION_ROLE_ARN: ${{ vars.THN_DEDICATED_RUNTIME_CFN_ROLE_ARN }}
     steps:
@@ -72,5 +67,5 @@ jobs:
       - name: Verify or create only the dedicated stack
         shell: bash
         env:
-          THN_DEDICATED_RUNTIME_PLAN_JSON: ${{ secrets.THN_DEDICATED_RUNTIME_PLAN_JSON }}
+          THN_FIRST_PLAN_REFERENCE_JSON: ${{ secrets.THN_FIRST_PLAN_REFERENCE_JSON }}
         run: python tools/thn_dedicated_runtime_test.py --operation "${{ inputs.operation }}"
