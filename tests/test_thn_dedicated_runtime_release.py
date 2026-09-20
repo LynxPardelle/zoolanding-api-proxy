@@ -267,6 +267,79 @@ class DedicatedRuntimeReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             module._stack_absent(Denied())
 
+    def test_full_verify_entrypoint_uses_existing_private_selection_without_writes(self):
+        module = self.module()
+        bucket = "aws-sam-cli-managed-default-samclisourcebucket-synthetic"
+        key = "zoolanding-api-proxy-test/thn-runtime/reviewed.zip"
+        version = "synthetic-version"
+        entries = {name: (ROOT / name).read_bytes() for name in (
+            "thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py")}
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            for name, body in entries.items():
+                archive.writestr(name, body)
+        body = output.getvalue()
+        first = {
+            "schema": "thn-first-runtime/v1", "service": "zoolanding-api-proxy",
+            "environment": "test", "tooling": {"sha": "a" * 40, "workflowSha256": "b" * 64},
+            "target": {"account": "765932874577", "region": "us-east-1",
+                       "stackId": "arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-api-proxy-test/synthetic"},
+            "baselineSha256": "c" * 64, "snapshotSha256": "d" * 64,
+            "templateSha256": "e" * 64, "packageSha256": hashlib.sha256(body).hexdigest(),
+            "package": {"Bucket": bucket, "Key": key, "Version": version},
+            "parameters": {
+                "EnableThnAuthRuntimeV2": "true",
+                "ThnAuthRuntimeV2DescriptorVersionId": PARAMETERS["DescriptorVersionId"],
+                "ThnAuthRuntimeV2DescriptorSha256": PARAMETERS["DescriptorSha256"],
+                "ThnAuthRuntimeV2AuthPolicyVersion": PARAMETERS["AuthPolicyVersion"],
+                "ThnAuthRuntimeV2CognitoUserPoolId": PARAMETERS["CognitoUserPoolId"],
+                "ThnAuthRuntimeV2CognitoClientId": PARAMETERS["CognitoClientId"],
+            },
+        }
+
+        class FakeSession:
+            region_name = "us-east-1"
+
+            def client(self, service):
+                if service == "sts":
+                    return SimpleNamespace(get_caller_identity=lambda: {"Account": "765932874577"})
+                if service == "s3":
+                    def get_object(**kwargs):
+                        self_test.assertEqual(kwargs, {"Bucket": bucket, "Key": key,
+                                                       "VersionId": version})
+                        return {"VersionId": version, "ContentLength": len(body),
+                                "Body": io.BytesIO(body)}
+                    return SimpleNamespace(get_object=get_object)
+                if service == "cloudformation":
+                    def describe_stacks(**kwargs):
+                        self_test.assertEqual(kwargs, {"StackName": module.STACK_NAME})
+                        raise ClientError({"Error": {"Code": "ValidationError",
+                                                     "Message": "Stack does not exist"}}, "DescribeStacks")
+                    return SimpleNamespace(describe_stacks=describe_stacks)
+                raise AssertionError("unexpected AWS client")
+
+        self_test = self
+        sha = "a" * 40
+        values = {
+            "GITHUB_REPOSITORY": "LynxPardelle/zoolanding-api-proxy",
+            "GITHUB_REF": "refs/heads/test", "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_SHA": sha, "SOURCE_SHA": sha,
+            "AWS_CLOUDFORMATION_ROLE_ARN":
+                "arn:aws:iam::765932874577:role/zoolanding-deployer-thn-auth-runtime-test-cfn-exec",
+            "AWS_REGION": "us-east-1", "AWS_DEFAULT_REGION": "us-east-1",
+            "SAM_ARTIFACTS_BUCKET": bucket,
+            "THN_TEMPLATE_SHA256": hashlib.sha256(
+                (ROOT / "template-thn-runtime-test.yaml").read_bytes()).hexdigest(),
+            "THN_FIRST_PLAN_REFERENCE_JSON": json.dumps({
+                "bucket": bucket,
+                "key": "zoolanding-api-proxy-test/first-provisioning/reviewed.json",
+                "versionId": "synthetic-version"}),
+        }
+        with patch.dict(os.environ, values), patch("boto3.Session", return_value=FakeSession()), \
+                patch("tools.thn_first_provisioning.load_plan", return_value=first), \
+                patch("tools.thn_first_provisioning._prerequisites"):
+            self.assertEqual(module.run_workflow("verify", os.environ), "verified")
+
 
 if __name__ == "__main__":
     unittest.main()
