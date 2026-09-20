@@ -1,7 +1,10 @@
 """Manual-only TEST workflow and pre-credential identity gates."""
 
 from pathlib import Path
+import io
+import os
 import unittest
+from unittest.mock import patch
 
 from tools import thn_dedicated_runtime_test as release
 
@@ -38,6 +41,9 @@ class DedicatedRuntimeWorkflowTests(unittest.TestCase):
         }
         self.assertEqual(release.validate_context(values, "123456789012"),
                          values["AWS_CLOUDFORMATION_ROLE_ARN"])
+        with patch.dict(os.environ, values):
+            self.assertEqual(release.validate_context(os.environ, "123456789012"),
+                             values["AWS_CLOUDFORMATION_ROLE_ARN"])
         for key, value in (("GITHUB_REF", "refs/heads/dev"),
                            ("GITHUB_REPOSITORY", "other/repo"),
                            ("GITHUB_EVENT_NAME", "push"),
@@ -46,6 +52,22 @@ class DedicatedRuntimeWorkflowTests(unittest.TestCase):
                             "arn:aws:iam::123456789012:role/zoolanding-deployer-api-proxy-test-cfn-exec")):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 release.validate_context({**values, key: value}, "123456789012")
+
+    def test_check_context_cli_accepts_real_os_environ_mapping(self):
+        values = {
+            "GITHUB_REPOSITORY": "LynxPardelle/zoolanding-api-proxy",
+            "GITHUB_REF": "refs/heads/test",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_SHA": "a" * 40,
+            "SOURCE_SHA": "a" * 40,
+            "AWS_CLOUDFORMATION_ROLE_ARN":
+                "arn:aws:iam::765932874577:role/zoolanding-deployer-thn-auth-runtime-test-cfn-exec",
+        }
+        output = io.StringIO()
+        with patch.dict(os.environ, values), patch("sys.argv", ["release", "--check-context"]), \
+                patch("sys.stdout", output):
+            self.assertEqual(release.main(), 0)
+        self.assertEqual(output.getvalue().strip(), "dedicated_runtime_context_verified")
 
 
 if __name__ == "__main__":
