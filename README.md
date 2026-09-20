@@ -73,6 +73,14 @@ Then point the Angular dev server proxy at `http://127.0.0.1:5055`. The local au
 
 ## Deploy
 
+The standalone THN TEST runtime is prepared in
+[its dedicated release guide](docs/thn-dedicated-runtime-test.md). It uses a
+separate REST API, Lambda, role, and CloudFormation stack. Its manual workflow
+defaults to read-only verification and does not update the shared API stack or
+switch the protected-admin CloudFront route. The old shared-stack first
+provisioning path below is retained as historical recovery context, not the
+activation path for this isolated design.
+
 The [isolated first THN TEST provisioning path](docs/thn-first-runtime-provisioning.md)
 promotes exact source without ordinary deployment, then verifies/applies only
 the native THN extension through its own private plan. It does not adopt a
