@@ -10,6 +10,7 @@ Keep new entries chronological, scoped to one change or operational pass, and ti
 
 ## Dedicated entries
 
+- [2026-09-19 — THN dedicated runtime plan reuse](2026-09-19-thn-dedicated-runtime-plan-reuse.md)
 - [2026-09-19 — THN dedicated runtime preparation](2026-09-19-thn-dedicated-runtime-preparation.md)
 
 - [2026-09-12 — Isolated first THN TEST provisioning](2026-09-12-thn-first-runtime-provisioning.md)

@@ -142,6 +142,46 @@ class DedicatedRuntimeReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             module.verify_package(good, "0" * 64, entries)
 
+    def test_derives_dedicated_selection_only_from_approved_first_plan(self):
+        module = self.module()
+        first = {
+            "schema": "thn-first-runtime/v1", "service": "zoolanding-api-proxy",
+            "environment": "test", "tooling": {"sha": "a" * 40, "workflowSha256": "b" * 64},
+            "target": {"account": "765932874577", "region": "us-east-1",
+                       "stackId": "arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-api-proxy-test/synthetic"},
+            "baselineSha256": "c" * 64, "snapshotSha256": "d" * 64,
+            "templateSha256": "e" * 64,
+            "package": {"Bucket": "synthetic-private",
+                        "Key": "zoolanding-api-proxy-test/thn-runtime/reviewed.zip",
+                        "Version": "synthetic-version"},
+            "packageSha256": "f" * 64,
+            "parameters": {
+                "EnableThnAuthRuntimeV2": "true",
+                "ThnAuthRuntimeV2DescriptorVersionId": "reviewed-1",
+                "ThnAuthRuntimeV2DescriptorSha256": "1" * 64,
+                "ThnAuthRuntimeV2AuthPolicyVersion": "reviewed-1",
+                "ThnAuthRuntimeV2CognitoUserPoolId": "us-east-1_example",
+                "ThnAuthRuntimeV2CognitoClientId": "exampleclient",
+            },
+        }
+        selected = module.derive_plan(first, "2" * 40, "3" * 64, "synthetic-private")
+        self.assertEqual(selected["package"], {
+            "bucket": "synthetic-private", "key": first["package"]["Key"],
+            "versionId": "synthetic-version", "sha256": "f" * 64})
+        self.assertEqual(selected["parameters"], PARAMETERS)
+        raw = json.dumps(selected, sort_keys=True, separators=(",", ":"))
+        self.assertEqual(module.validate_plan(raw, hashlib.sha256(raw.encode()).hexdigest(),
+                                              "2" * 40, "3" * 64, "synthetic-private"), selected)
+        for changed in (
+            {**first, "environment": "prod"},
+            {**first, "package": {**first["package"], "Bucket": "other"}},
+            {**first, "package": {**first["package"], "Key": "elsewhere/reviewed.zip"}},
+            {**first, "parameters": {**first["parameters"], "EnableThnAuthRuntimeV2": "false"}},
+            {**first, "target": {**first["target"], "account": "123456789012"}},
+        ):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                module.derive_plan(changed, "2" * 40, "3" * 64, "synthetic-private")
+
     def test_release_verify_is_read_only_and_create_reviews_before_execute(self):
         module = self.module()
         self.assertTrue(hasattr(module, "release"), "reviewed release sequence missing")
