@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Dedicated TEST-only The Hair Narrative auth runtime discovery.
+
+Parameters:
+  DescriptorVersionId:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+  DescriptorSha256:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[a-f0-9]{64}$'
+  AuthPolicyVersion:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+  CognitoUserPoolId:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^us-east-1_[A-Za-z0-9]+$'
+  CognitoClientId:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[a-z0-9]{1,128}$'
+
+Rules:
+  ThnRuntimeInputsRequired:
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: DescriptorVersionId
+                - BLOCKED
+        AssertDescription: A reviewed THN descriptor version is required.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: DescriptorSha256
+                - '0000000000000000000000000000000000000000000000000000000000000000'
+        AssertDescription: A reviewed nonzero descriptor digest is required.
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: AuthPolicyVersion
+                - BLOCKED
+        AssertDescription: A reviewed THN authorization policy is required.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 15
+    MemorySize: 256
+    Tracing: PassThrough
+
+Resources:
+  ThnRuntimeApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      EndpointConfiguration: REGIONAL
+
+  ThnAuthRuntimeV2Function:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: thn_auth_runtime_v2.lambda_handler
+      Description: Browser-safe THN TEST auth discovery only.
+      AutoPublishAlias: test
+      Environment:
+        Variables:
+          SERVICE_BINDING_REGISTRY_V2_TABLE_NAME: zoolanding-content-hub-test-ServiceBindingRegistryV2
+          THN_AUTH_RUNTIME_V2_DESCRIPTOR_VERSION_ID:
+            Ref: DescriptorVersionId
+          THN_AUTH_RUNTIME_V2_DESCRIPTOR_SHA256:
+            Ref: DescriptorSha256
+          THN_AUTH_RUNTIME_V2_AUTH_POLICY_VERSION:
+            Ref: AuthPolicyVersion
+          THN_AUTH_RUNTIME_V2_AWS_PARTITION:
+            Ref: AWS::Partition
+          THN_AUTH_RUNTIME_V2_AWS_ACCOUNT_ID:
+            Ref: AWS::AccountId
+          THN_AUTH_RUNTIME_V2_AWS_REGION:
+            Ref: AWS::Region
+          THN_AUTH_RUNTIME_V2_AWS_URL_SUFFIX:
+            Ref: AWS::URLSuffix
+          THN_AUTH_RUNTIME_V2_COGNITO_USER_POOL_ID:
+            Ref: CognitoUserPoolId
+          THN_AUTH_RUNTIME_V2_COGNITO_CLIENT_ID:
+            Ref: CognitoClientId
+          LOG_LEVEL: INFO
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                Fn::Sub: arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/zoolanding-content-hub-test-ServiceBindingRegistryV2
+              Condition:
+                ForAllValues:StringEquals:
+                  dynamodb:LeadingKeys:
+                    - SERVICE_BINDING#test#thn-journal-test-v2
+      Events:
+        RuntimeGet:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ThnRuntimeApi
+            Path: /auth-v2/runtime-config
+            Method: GET
+        RuntimePost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ThnRuntimeApi
+            Path: /auth-v2/runtime-config
+            Method: POST
+
+  ThnRuntimeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${ThnAuthRuntimeV2Function}
+      RetentionInDays: 7
+
+Outputs:
+  ThnRuntimeEndpoint:
+    Description: TEST-only CloudFront origin route; not an authorization boundary.
+    Value:
+      Fn::Sub: https://${ThnRuntimeApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/auth-v2/runtime-config

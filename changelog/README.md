@@ -10,6 +10,8 @@ Keep new entries chronological, scoped to one change or operational pass, and ti
 
 ## Dedicated entries
 
+- [2026-09-19 — THN dedicated runtime preparation](2026-09-19-thn-dedicated-runtime-preparation.md)
+
 - [2026-09-12 — Isolated first THN TEST provisioning](2026-09-12-thn-first-runtime-provisioning.md)
 - [2026-09-12 — Retained THN TEST runtime route controller](2026-09-12-thn-retained-runtime-routes.md)
 - [2026-09-12 — Explicit AWS-observed TEST code recovery](2026-09-12-aws-observed-recovery.md)
