@@ -32,6 +32,14 @@ ALLOWED_TYPES = frozenset({"AWS::ApiGateway::RestApi", "AWS::ApiGateway::Deploym
                            "AWS::Lambda::Permission", "AWS::IAM::Role", "AWS::Logs::LogGroup"})
 STACK_NAME = "zoolanding-thn-auth-runtime-test"
 ROLE_NAME = "zoolanding-deployer-thn-auth-runtime-test-cfn-exec"
+APPROVED_FIRST_PLAN_SHA256 = "43125fcc1a882927d99bb088b8dcac53385da668f12e4ee16c07a796614e7979"
+FIRST_PARAMETER_MAP = {
+    "DescriptorVersionId": "ThnAuthRuntimeV2DescriptorVersionId",
+    "DescriptorSha256": "ThnAuthRuntimeV2DescriptorSha256",
+    "AuthPolicyVersion": "ThnAuthRuntimeV2AuthPolicyVersion",
+    "CognitoUserPoolId": "ThnAuthRuntimeV2CognitoUserPoolId",
+    "CognitoClientId": "ThnAuthRuntimeV2CognitoClientId",
+}
 
 
 def _require(value: bool, message: str) -> None:
@@ -179,7 +187,8 @@ def validate_plan(raw: str, expected_digest: str, source_sha: str, template_dige
              and package["bucket"] == approved_bucket
              and isinstance(package["key"], str)
              and package["key"].startswith("zoolanding-api-proxy-test/thn-runtime/")
-             and package["key"].endswith("/runtime-v2.zip")
+             and re.fullmatch(r"zoolanding-api-proxy-test/thn-runtime/[A-Za-z0-9_/-]+\.zip",
+                              package["key"]) is not None
              and len(package["key"]) <= 1024
              and all(part not in ("", ".", "..") for part in package["key"].split("/"))
              and re.fullmatch(r"[A-Za-z0-9_./-]+", package["key"]) is not None
@@ -203,6 +212,50 @@ def validate_plan(raw: str, expected_digest: str, source_sha: str, template_dige
              and re.fullmatch(r"[a-z0-9]{1,128}", parameters["CognitoClientId"]) is not None,
              "dedicated_plan_parameters_invalid")
     return plan
+
+
+def derive_plan(first: dict[str, Any], source_sha: str, template_digest: str,
+                approved_bucket: str) -> dict[str, Any]:
+    """Translate only the previously sealed first plan into an in-memory selection."""
+
+    _require(isinstance(first, dict) and set(first) == {
+        "schema", "service", "environment", "tooling", "target", "baselineSha256",
+        "snapshotSha256", "templateSha256", "package", "packageSha256", "parameters"}
+        and first["schema"] == "thn-first-runtime/v1"
+        and first["service"] == "zoolanding-api-proxy" and first["environment"] == "test"
+        and isinstance(first["tooling"], dict)
+        and set(first["tooling"]) == {"sha", "workflowSha256"}
+        and re.fullmatch(r"[a-f0-9]{40}", first["tooling"]["sha"]) is not None
+        and all(re.fullmatch(r"[a-f0-9]{64}", first[name]) is not None for name in (
+            "baselineSha256", "snapshotSha256", "templateSha256", "packageSha256")),
+        "dedicated_first_plan_identity_invalid")
+    target = first["target"]
+    _require(isinstance(target, dict) and set(target) == {"account", "region", "stackId"}
+             and target["account"] == "765932874577" and target["region"] == "us-east-1"
+             and re.fullmatch(
+                 r"arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-api-proxy-test/[A-Za-z0-9-]+",
+                 target["stackId"]) is not None,
+             "dedicated_first_target_invalid")
+    old_package = first["package"]
+    _require(isinstance(old_package, dict) and set(old_package) == {"Bucket", "Key", "Version"}
+             and old_package["Bucket"] == approved_bucket,
+             "dedicated_first_package_invalid")
+    old_parameters = first["parameters"]
+    _require(isinstance(old_parameters, dict)
+             and set(old_parameters) == set(FIRST_PARAMETER_MAP.values()) | {"EnableThnAuthRuntimeV2"}
+             and old_parameters["EnableThnAuthRuntimeV2"] == "true",
+             "dedicated_first_parameters_invalid")
+    selected = {
+        "schemaVersion": 1, "environment": "test", "stackName": STACK_NAME,
+        "sourceSha": source_sha, "templateSha256": template_digest,
+        "package": {"bucket": old_package["Bucket"], "key": old_package["Key"],
+                    "versionId": old_package["Version"], "sha256": first["packageSha256"]},
+        "parameters": {name: old_parameters[old_name]
+                       for name, old_name in FIRST_PARAMETER_MAP.items()},
+    }
+    raw = json.dumps(selected, sort_keys=True, separators=(",", ":"))
+    return validate_plan(raw, hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+                         source_sha, template_digest, approved_bucket)
 
 
 def verify_package(body: bytes, expected_digest: str, source_entries: dict[str, bytes]) -> bool:
@@ -298,10 +351,16 @@ def _stack_absent(cloudformation: Any) -> bool:
 
 
 def run_workflow(operation: str, values: dict[str, str]) -> str:
-    """Read back a sealed artifact, then optionally create only the new stack."""
+    """Derive the selection in memory, then optionally create only the new stack."""
 
     import boto3
     import yaml
+    try:
+        from tools import aws_live_snapshot as recovery
+        from tools import thn_first_provisioning as first_release
+    except ModuleNotFoundError:
+        import aws_live_snapshot as recovery
+        import thn_first_provisioning as first_release
 
     role = validate_context(values, "765932874577")
     _require(operation in {"verify", "create"}
@@ -309,29 +368,57 @@ def run_workflow(operation: str, values: dict[str, str]) -> str:
              and values.get("AWS_DEFAULT_REGION") == "us-east-1"
              and isinstance(values.get("SAM_ARTIFACTS_BUCKET"), str)
              and values["SAM_ARTIFACTS_BUCKET"].startswith("aws-sam-cli-managed-default-samclisourcebucket-")
-             and re.fullmatch(r"[a-f0-9]{64}", values.get("THN_PLAN_SHA256", "")) is not None
              and re.fullmatch(r"[a-f0-9]{64}", values.get("THN_TEMPLATE_SHA256", "")) is not None,
              "dedicated_workflow_inputs_invalid")
     root = Path(__file__).resolve().parents[1]
     template_bytes = (root / "template-thn-runtime-test.yaml").read_bytes()
     _require(hashlib.sha256(template_bytes).hexdigest() == values["THN_TEMPLATE_SHA256"],
              "dedicated_template_digest_invalid")
-    plan = validate_plan(values.get("THN_DEDICATED_RUNTIME_PLAN_JSON", ""),
-                         values["THN_PLAN_SHA256"], values["SOURCE_SHA"],
-                         values["THN_TEMPLATE_SHA256"], values["SAM_ARTIFACTS_BUCKET"])
+    reference = recovery.private_json(values.get("THN_FIRST_PLAN_REFERENCE_JSON", ""))
+    recovery.closed(reference, {"bucket", "key", "versionId"})
+    _require(reference["bucket"] == values["SAM_ARTIFACTS_BUCKET"]
+             and isinstance(reference["key"], str)
+             and re.fullmatch(r"zoolanding-api-proxy-test/first-provisioning/[A-Za-z0-9_/-]+\.json",
+                              reference["key"]) is not None
+             and not any(part in {"", ".", ".."} for part in reference["key"].split("/"))
+             and isinstance(reference["versionId"], str)
+             and re.fullmatch(r"[A-Za-z0-9_.+/-]{1,1024}", reference["versionId"]) is not None
+             and reference["versionId"] != "null",
+             "dedicated_first_reference_invalid")
+    session = boto3.Session(region_name="us-east-1")
+    _require(session.client("sts").get_caller_identity().get("Account") == "765932874577",
+             "dedicated_aws_account_invalid")
+    try:
+        first_plan = first_release.load_plan(session, reference, APPROVED_FIRST_PLAN_SHA256)
+    except Exception:
+        raise ValueError("dedicated_first_plan_readback_failed") from None
+    try:
+        first_release._parameters(yaml.safe_load((root / "template.yaml").read_bytes()),
+                                  first_plan["parameters"])
+    except Exception:
+        raise ValueError("dedicated_first_plan_parameters_invalid") from None
+    plan = derive_plan(first_plan, values["SOURCE_SHA"], values["THN_TEMPLATE_SHA256"],
+                       values["SAM_ARTIFACTS_BUCKET"])
+    try:
+        first_release._prerequisites(session, first_plan["parameters"], "765932874577")
+    except Exception:
+        raise ValueError("dedicated_auth_prerequisite_invalid") from None
     source = yaml.safe_load(template_bytes)
     package = plan["package"]
     native = render_native(source, {"Bucket": package["bucket"], "Key": package["key"],
                                     "Version": package["versionId"]}, plan["parameters"])
-    session = boto3.Session(region_name="us-east-1")
-    _require(session.client("sts").get_caller_identity().get("Account") == "765932874577",
-             "dedicated_aws_account_invalid")
-    result = session.client("s3").get_object(Bucket=package["bucket"], Key=package["key"],
-                                               VersionId=package["versionId"])
+    try:
+        result = session.client("s3").get_object(Bucket=package["bucket"], Key=package["key"],
+                                                  VersionId=package["versionId"])
+    except Exception:
+        raise ValueError("dedicated_package_readback_failed") from None
     _require(result.get("VersionId") == package["versionId"]
              and result.get("ContentLength", 0) <= 1_048_576,
              "dedicated_package_version_invalid")
-    body = result["Body"].read(1_048_577)
+    try:
+        body = result["Body"].read(1_048_577)
+    except Exception:
+        raise ValueError("dedicated_package_readback_failed") from None
     source_entries = {name: (root / name).read_bytes() for name in (
         "thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py")}
     verify_package(body, package["sha256"], source_entries)

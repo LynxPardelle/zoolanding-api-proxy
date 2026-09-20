@@ -21,6 +21,8 @@ class DedicatedRuntimeWorkflowTests(unittest.TestCase):
         self.assertIn("options: [verify, create]", source)
         self.assertIn("default: verify", source)
         self.assertIn("python tools/thn_dedicated_runtime_test.py", source)
+        self.assertIn("secrets.THN_FIRST_PLAN_REFERENCE_JSON", source)
+        self.assertNotIn("secrets.THN_DEDICATED_RUNTIME_PLAN_JSON", source)
         self.assertNotIn("sam deploy", source)
 
     def test_context_requires_exact_test_branch_and_dedicated_role(self):
