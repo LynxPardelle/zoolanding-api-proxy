@@ -9,6 +9,7 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_FILES = (
+    "thn_environment_profile.py",
     "thn_auth_runtime_v2.py",
     "service_binding_registry_consumer_v2.py",
 )

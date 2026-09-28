@@ -138,7 +138,7 @@ class FirstAWS(SyntheticAWS):
         self.stack["Parameters"] = [{"ParameterKey": "AuthRuntimeEnvironment", "ParameterValue": "test"}, {"ParameterKey": "LogLevel", "ParameterValue": "INFO"}]
         self.resources = [{"LogicalResourceId": name, "PhysicalResourceId": "abc123test" if name == API else name + "-physical",
             "ResourceType": value["Type"], "ResourceStatus": "CREATE_COMPLETE"} for name, value in self.original["Resources"].items()]
-        self.forward_body = stable_zip([(name, (ROOT / name).read_bytes()) for name in ("thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py")])
+        self.forward_body = stable_zip([(name, (ROOT / name).read_bytes()) for name in ("thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py", "thn_environment_profile.py")])
         self.export_hook = None
         self.prerequisite_ready = True
         self.auth_stack = {"StackName": "zoolanding-auth-admin-test", "StackStatus": "UPDATE_COMPLETE", "EnableTerminationProtection": True,

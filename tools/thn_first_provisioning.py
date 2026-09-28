@@ -180,7 +180,7 @@ def _package(session, package, expected_sha256, account):
     inventory = recovery.zip_inventory(payload)
     expected = sorted([{"path": name, "sizeBytes": (ROOT / name).stat().st_size, "sha256": digest((ROOT / name).read_bytes())}
                        for name in ALLOWED_FILES], key=lambda row: row["path"])
-    require(inventory == expected, "thn_first_exact_two_file_package_required")
+    require(inventory == expected, "thn_first_exact_profile_package_required")
     require(recovery._version_bytes(session, request, account, 2 * 1024 * 1024) == payload, "thn_first_package_readback_invalid")
 
 

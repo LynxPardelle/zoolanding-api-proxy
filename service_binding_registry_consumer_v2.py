@@ -14,20 +14,22 @@ import re
 from typing import Any
 
 
-APPROVED_TABLE_NAME = "zoolanding-content-hub-test-ServiceBindingRegistryV2"
+from thn_environment_profile import PROFILE
+
+APPROVED_TABLE_NAME = f"{PROFILE['hubStack']}-ServiceBindingRegistryV2"
 APPROVED_PARTITIONS = frozenset({"aws", "aws-us-gov", "aws-cn"})
-APPROVED_ENVIRONMENT = "test"
+APPROVED_ENVIRONMENT = PROFILE["environment"]
 APPROVED_DOMAIN = "thehairnarrative.com"
-APPROVED_SERVICE_BINDING_ID = "thn-journal-test-v2"
+APPROVED_SERVICE_BINDING_ID = PROFILE["serviceBindingId"]
 APPROVED_HUB_ID = "thehairnarrative-com-journal"
 APPROVED_TENANT_ID = "thehairnarrative-com"
 APPROVED_AUTH_PROFILE_ID = "journal-owner"
-APPROVED_ADMIN_ORIGIN = "https://admin-test.thehairnarrative.com"
-APPROVED_COOKIE_NAMESPACE = "endefiz7dkk635k6di6k"
+APPROVED_ADMIN_ORIGIN = PROFILE["adminOrigin"]
+APPROVED_COOKIE_NAMESPACE = PROFILE["cookieNamespace"]
 RECORD_SORT_KEY = "REGISTRY#V2"
 RECORD_TYPE = "service-binding-registry-v2"
 SCHEMA_VERSION = 2
-ALLOWED_WRITER_MODES = frozenset({"disabled", "qa-only", "client-owner"})
+ALLOWED_WRITER_MODES = frozenset({"disabled", "client-owner"} | ({"qa-only"} if APPROVED_ENVIRONMENT == "test" else set()))
 
 BINDING_PARTITION_KEY = (
     f"SERVICE_BINDING#{APPROVED_ENVIRONMENT}#{APPROVED_SERVICE_BINDING_ID}"
@@ -76,11 +78,11 @@ RECORD_FIELDS = frozenset(
 RESOURCE_BINDING_RESOURCES = {
     "authoringFunctionArn": (
         "lambda",
-        "function:zoolanding-content-hub-test-ThnContentHubV2Authoring",
+        f"function:{PROFILE['hubStack']}-ThnContentHubV2Authoring",
     ),
     "metadataTableArn": (
         "dynamodb",
-        "table/zoolanding-content-hub-test-ThnContentHubV2Metadata",
+        f"table/{PROFILE['hubStack']}-ThnContentHubV2Metadata",
     ),
 }
 
