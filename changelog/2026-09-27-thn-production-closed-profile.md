@@ -22,3 +22,8 @@ Production release supports retained native previews, exact digest execution, se
 The production projection normalizes the REGIONAL endpoint to the current SAM
 object shape required by cfn-lint 1.56.0. The complete native translation is
 identical to the prior scalar form; the TEST source remains unchanged.
+
+The protected source promotion now checks the parsed native merge commit
+against GITHUB_SHA. This resolves the actual ShellCheck SC2034 unused-variable
+failure and explicitly binds the head identity. Actionlint 1.7.12 with the CI
+ShellCheck 0.9.0 validates every tracked workflow without suppressing checks.
