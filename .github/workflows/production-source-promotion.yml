@@ -1,0 +1,45 @@
+name: Production Source Promotion
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Require exact source-only TEST promotion
+        id: promotion
+        shell: bash
+        env:
+          PRODUCTION_PROMOTION_SELECTION_JSON: ${{ vars.API_PRODUCTION_PROMOTION_SELECTION_JSON }}
+          BEFORE_SHA: ${{ github.event.before }}
+          PUSH_FORCED: ${{ github.event.forced }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$PUSH_FORCED" != "true"
+          git fetch --no-tags origin refs/heads/test:refs/remotes/origin/test
+          read -r commit first_parent second_parent extra < <(git rev-list --parents -n 1 HEAD)
+          test "$commit" = "$GITHUB_SHA"
+          test -n "$first_parent" && test -n "$second_parent" && test -z "${extra:-}"
+          test "$first_parent" = "$BEFORE_SHA"
+          test "$second_parent" = "$(git rev-parse refs/remotes/origin/test)"
+          PROMOTED_SOURCE_SHA="$second_parent"
+          PROMOTED_SOURCE_TREE="$(git rev-parse 'refs/remotes/origin/test^{tree}')"
+          PROMOTED_TARGET_BASE_SHA="$first_parent"
+          PROMOTED_MERGE_TREE="$(git merge-tree --write-tree "$first_parent" "$second_parent")"
+          test "$PROMOTED_MERGE_TREE" = "$(git rev-parse 'HEAD^{tree}')"
+          export PROMOTED_SOURCE_SHA PROMOTED_SOURCE_TREE PROMOTED_TARGET_BASE_SHA PROMOTED_MERGE_TREE
+          mode="$(python tools/classify_production_promotion.py)"
+          test "$mode" = "thn-source-only"
+          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
+      - name: Validate promoted source without AWS credentials
+        run: python -m unittest discover -s tests -p 'test_classify_production_promotion.py'

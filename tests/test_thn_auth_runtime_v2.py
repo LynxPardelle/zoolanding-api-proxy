@@ -419,7 +419,7 @@ class TestThnAuthRuntimeV2Template(unittest.TestCase):
             artifact_builder.build(destination)
             self.assertEqual(
                 {entry.name for entry in destination.iterdir()},
-                {"thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py"},
+                {"thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py", "thn_environment_profile.py"},
             )
             with self.assertRaisesRegex(RuntimeError, "not empty"):
                 artifact_builder.build(destination)
