@@ -262,7 +262,7 @@ def derive_plan(first: dict[str, Any], source_sha: str, template_digest: str,
 def verify_package(body: bytes, expected_digest: str, source_entries: dict[str, bytes]) -> bool:
     """Read back a private versioned ZIP without logging its content."""
 
-    expected_names = {"thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py"}
+    expected_names = {"thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py", "thn_environment_profile.py"}
     _require(isinstance(body, bytes) and 0 < len(body) <= 1_048_576
              and hashlib.sha256(body).hexdigest() == expected_digest
              and isinstance(source_entries, dict) and set(source_entries) == expected_names,
@@ -270,7 +270,7 @@ def verify_package(body: bytes, expected_digest: str, source_entries: dict[str, 
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
             infos = archive.infolist()
-            _require(len(infos) == 2 and {entry.filename for entry in infos} == expected_names
+            _require(len(infos) == 3 and {entry.filename for entry in infos} == expected_names
                      and all(not entry.is_dir() for entry in infos),
                      "dedicated_package_inventory_invalid")
             for name in expected_names:
@@ -423,7 +423,7 @@ def run_workflow(operation: str, values: dict[str, str]) -> str:
     except Exception:
         raise ValueError("dedicated_package_readback_failed") from None
     source_entries = {name: (root / name).read_bytes() for name in (
-        "thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py")}
+        "thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py", "thn_environment_profile.py")}
     verify_package(body, package["sha256"], source_entries)
     cloudformation = session.client("cloudformation")
     _stack_absent(cloudformation)

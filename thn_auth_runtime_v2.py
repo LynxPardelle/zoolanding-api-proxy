@@ -27,7 +27,7 @@ from service_binding_registry_consumer_v2 import (
 
 
 ADMIN_ORIGIN = APPROVED_ADMIN_ORIGIN
-ADMIN_HOST = "admin-test.thehairnarrative.com"
+ADMIN_HOST = APPROVED_ADMIN_ORIGIN.removeprefix("https://")
 RUNTIME_PATH = "/auth-v2/runtime-config"
 ALLOWED_METHODS = frozenset({"GET", "POST"})
 REQUEST_FIELDS = frozenset({"domain", "authProfileId"})

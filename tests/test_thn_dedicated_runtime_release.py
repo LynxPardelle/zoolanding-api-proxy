@@ -123,7 +123,7 @@ class DedicatedRuntimeReleaseTests(unittest.TestCase):
     def test_package_is_exact_two_source_modules(self):
         module = self.module()
         self.assertTrue(hasattr(module, "verify_package"), "package readback guard missing")
-        entries = {"thn_auth_runtime_v2.py": b"handler", "service_binding_registry_consumer_v2.py": b"registry"}
+        entries = {"thn_auth_runtime_v2.py": b"handler", "service_binding_registry_consumer_v2.py": b"registry", "thn_environment_profile.py": b"profile"}
 
         def archive(files):
             buffer = io.BytesIO()
@@ -273,7 +273,7 @@ class DedicatedRuntimeReleaseTests(unittest.TestCase):
         key = "zoolanding-api-proxy-test/thn-runtime/reviewed.zip"
         version = "synthetic-version"
         entries = {name: (ROOT / name).read_bytes() for name in (
-            "thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py")}
+            "thn_auth_runtime_v2.py", "service_binding_registry_consumer_v2.py", "thn_environment_profile.py")}
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w") as archive:
             for name, body in entries.items():
