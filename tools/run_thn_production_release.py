@@ -31,6 +31,38 @@ def load_json(value):
     release.require(isinstance(value,str) and 0<len(value.encode())<=1024*1024)
     return json.loads(value,object_pairs_hook=pairs)
 
+def production_environment():
+    """Read the independent GitHub branch fence; AWS cannot evaluate a ref claim."""
+    repository=f'LynxPardelle/{CONFIG["repository"]}'
+    endpoint=f'repos/{repository}/environments/production'
+    def read(url):
+        return load_json(subprocess.run(['gh','api',url],text=True,capture_output=True,check=True).stdout)
+    environment=read(endpoint)
+    rules=read(endpoint+'/deployment-branch-policies?per_page=100&page=1')
+    policy=environment.get('deployment_branch_policy')
+    release.require(environment.get('name')=='production' and
+        environment.get('html_url')==f'https://github.com/{repository}/deployments/activity_log?environments_filter=production' and
+        isinstance(policy,dict) and set(policy)=={'custom_branch_policies','protected_branches'} and
+        policy['custom_branch_policies'] is True and policy['protected_branches'] is False,
+        'production_environment_branch_fence_invalid')
+    branches=rules.get('branch_policies')
+    release.require(type(rules.get('total_count')) is int and rules['total_count']==1 and
+        isinstance(branches,list) and len(branches)==1 and
+        branches[0].get('name')=='main' and branches[0].get('type')=='branch',
+        'production_environment_branch_fence_invalid')
+    return {'repository':repository,'environment':'production','branch':'main',
+        'deploymentBranchPolicy':policy,'branchPolicies':branches,
+        'protectionRules':environment.get('protection_rules',[])}
+
+def validate_github_trust(trust):
+    expected={'Effect':'Allow','Action':'sts:AssumeRoleWithWebIdentity',
+        'Principal':{'Federated':f'arn:aws:iam::{release.ACCOUNT}:oidc-provider/token.actions.githubusercontent.com'},
+        'Condition':{'StringEquals':{'token.actions.githubusercontent.com:aud':'sts.amazonaws.com',
+            'token.actions.githubusercontent.com:sub':f'repo:LynxPardelle/{CONFIG["repository"]}:environment:production'}}}
+    release.require(isinstance(trust,dict) and trust.get('Statement')==[expected] and
+        set(trust)<= {'Version','Statement'} and trust.get('Version','2012-10-17')=='2012-10-17',
+        'production_github_standard_trust_invalid')
+
 def source_selection(source_sha):
     git=lambda *args:subprocess.run(['git',*args],cwd=ROOT,text=True,capture_output=True,check=True).stdout.strip()
     release.require(release._sha(source_sha,40) and git('rev-parse','HEAD')==source_sha)
@@ -38,9 +70,11 @@ def source_selection(source_sha):
     latest=subprocess.run(['gh','api',f'repos/LynxPardelle/{CONFIG["repository"]}/git/ref/heads/main','--jq','.object.sha'],
         text=True,capture_output=True,check=True).stdout.strip()
     release.require(latest==source_sha,'production_remote_main_changed')
-    release.require(os.environ.get('GITHUB_REF')=='refs/heads/main' and os.environ.get('GITHUB_EVENT_NAME')=='workflow_dispatch')
+    release.require(os.environ.get('GITHUB_REPOSITORY')==f'LynxPardelle/{CONFIG["repository"]}' and
+        os.environ.get('GITHUB_REF')=='refs/heads/main' and os.environ.get('GITHUB_EVENT_NAME')=='workflow_dispatch')
     subprocess.run(['git','diff','--quiet','HEAD','--'],cwd=ROOT,check=True)
     return {'sourceSha':source_sha,'sourceTree':git('rev-parse','HEAD^{tree}'),
+        'productionEnvironment':production_environment(),
         'operationFiles':{name:release.sha((ROOT/name).read_bytes()) for name in
             ('tools/thn_production_release.py','tools/run_thn_production_release.py',
              'tools/thn_production_service.py','tools/prepare_thn_production_template.py',
@@ -64,14 +98,7 @@ def identity_and_permissions(session,source,purpose,native_changes=None,native_t
         str(identity.get('Arn','')).startswith(f'arn:aws:sts::{release.ACCOUNT}:assumed-role/{expected}/'))
     iam=session.client('iam')
     role=iam.get_role(RoleName=expected)['Role']
-    assume=role['AssumeRolePolicyDocument']
-    allows=[s for s in assume['Statement'] if s['Effect']=='Allow']
-    release.require(len(allows)==1 and allows[0]['Action']=='sts:AssumeRoleWithWebIdentity')
-    release.require(allows[0]['Principal']=={'Federated':f'arn:aws:iam::{release.ACCOUNT}:oidc-provider/token.actions.githubusercontent.com'})
-    expected_conditions={'token.actions.githubusercontent.com:aud':'sts.amazonaws.com',
-        'token.actions.githubusercontent.com:sub':f'repo:LynxPardelle/{CONFIG["repository"]}:environment:production'}
-    if CONFIG['service'] in {'api','image'}:expected_conditions['token.actions.githubusercontent.com:ref']='refs/heads/main'
-    release.require(allows[0]['Condition']=={'StringEquals':expected_conditions})
+    validate_github_trust(role['AssumeRolePolicyDocument'])
     execution=iam.get_role(RoleName=CONFIG['executionRole'])['Role']
     trust=execution['AssumeRolePolicyDocument']['Statement']
     release.require(len(trust)==1 and trust[0]['Effect']=='Allow' and
@@ -108,7 +135,10 @@ def identity_and_permissions(session,source,purpose,native_changes=None,native_t
         release.require(all(isinstance(a,str) and '*' not in a and ':' in a for a in request['actions']))
         # Only the concrete action/resource simulation determines relevant
         # missing context. Whole-policy context keys include unrelated statements.
-        kwargs={'PolicySourceArn':request['principalArn'],'ActionNames':request['actions'],
+        # IAM action names are case insensitive. The live simulator rejects
+        # some mixed-case spellings even under an otherwise identical policy.
+        # Preserve the reviewed request; normalize only the simulation input.
+        kwargs={'PolicySourceArn':request['principalArn'],'ActionNames':[a.lower() for a in request['actions']],
             'ResourceArns':request['resources'],'ContextEntries':request['context']}
         result=iam.simulate_principal_policy(**kwargs)
         evaluations=result.get('EvaluationResults',[])
@@ -117,7 +147,16 @@ def identity_and_permissions(session,source,purpose,native_changes=None,native_t
         for evaluation in evaluations:
             release.require(evaluation.get('EvalDecision')=='allowed' and not evaluation.get('MissingContextValues'),
                 'production_effective_permission_denied')
-            release.require(all(item.get('EvalResourceDecision')=='allowed' for item in evaluation.get('ResourceSpecificResults',[])))
+            release.require(all(item.get('EvalResourceDecision')=='allowed' and not item.get('MissingContextValues') for item in evaluation.get('ResourceSpecificResults',[])))
+        for action in kwargs['ActionNames']:
+            covered=[]
+            for evaluation in evaluations:
+                if evaluation['EvalActionName'].lower()!=action:continue
+                nested=evaluation.get('ResourceSpecificResults',[])
+                if nested:covered.extend(item.get('EvalResourceName') for item in nested)
+                else:covered.append(evaluation.get('EvalResourceName'))
+            release.require(sorted(covered,key=str)==sorted(request['resources']),
+                'production_iam_simulation_resource_coverage_incomplete')
         proofs.append({'request':request,'evaluation':evaluations})
     # Full policy documents stay in memory, are fingerprinted and never emitted.
     def policies(name):
