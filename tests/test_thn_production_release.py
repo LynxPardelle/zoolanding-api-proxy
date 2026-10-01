@@ -172,6 +172,68 @@ class EffectivePermissionDriverTests(unittest.TestCase):
             self.assertEqual(call.kwargs['ResourceArns'],request['resources'])
             self.assertEqual(call.kwargs['ContextEntries'],request['context'])
         self.assertEqual(requests[1]['actions'],['lambda:GetFunction'])
+
+    def test_dedicated_create_review_reaches_sealed_native_record(self):
+        import io,json,os,tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import Mock,patch
+        import yaml
+        from samtranslator.translator.transform import transform
+        from tools import run_thn_production_release as driver
+        from tools.prepare_thn_production_template import prepare_template
+        from tools.thn_production_release import sha
+
+        source_sha='a'*40
+        source=prepare_template(yaml.safe_load((Path(__file__).resolve().parents[1]/'template-thn-runtime-test.yaml').read_text()))
+        source['Resources']['ThnAuthRuntimeV2Function']['Properties']['CodeUri']={
+            'Bucket':'zlp-thn-production-releases-765932874577-us-east-1',
+            'Key':'thn/production/api/reviewed.zip','Version':'v1'}
+        selected={'DescriptorVersionId':'synthetic-production-v1','DescriptorSha256':'b'*64,
+                  'AuthPolicyVersion':'synthetic-production-v1','CognitoUserPoolId':'us-east-1_synthetic',
+                  'CognitoClientId':'syntheticclient'}
+        with patch.dict(os.environ,{'AWS_DEFAULT_REGION':'us-east-1'}):
+            native=transform(source,selected,{})
+        changes=[{'Type':'Resource','ResourceChange':{'Action':'Add','LogicalResourceId':name,
+                  'ResourceType':item['Type'],'Replacement':'False'}}
+                 for name,item in native['Resources'].items()]
+        stack='arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-thn-auth-runtime-production/id'
+        change_set='arn:aws:cloudformation:us-east-1:765932874577:changeSet/thn-production-api-activate-100-1/id'
+        preview={'StackId':stack,'Changes':changes,'Parameters':[
+            {'ParameterKey':key,'ParameterValue':value} for key,value in selected.items()]}
+        baseline={'absent':True,'parameters':[],'original':{'Resources':{}},
+                  'processed':{'Resources':{}},'terminationProtection':True}
+        cf,s3=Mock(),Mock()
+        cf.create_change_set.return_value={'Id':change_set}
+        cf.get_template.side_effect=lambda **kw:{'TemplateBody':source if kw['TemplateStage']=='Original' else native}
+        session=Mock()
+        session.client.side_effect={'cloudformation':cf,'s3':s3}.__getitem__
+        package={'bucket':'zlp-thn-production-releases-765932874577-us-east-1',
+                 'key':'thn/production/api/reviewed.zip','versionId':'v1','sha256':'c'*64}
+        def seal(_s3,bucket,key,body):
+            return {'bucket':bucket,'key':key,'versionId':'v2','sha256':sha(body)}
+        with tempfile.TemporaryDirectory() as directory:
+            template=Path(directory)/'packaged.json'
+            record=Path(directory)/'review.json'
+            template.write_text(json.dumps(source))
+            args=SimpleNamespace(purpose='activate',scope='private',template=str(template),
+                                 record=str(record))
+            with patch.dict(os.environ,{'THN_PRODUCTION_PARAMETERS_JSON':json.dumps(selected),
+                 'GITHUB_RUN_ID':'100','GITHUB_RUN_ATTEMPT':'1'}), \
+                 patch.object(driver,'captured_baseline',return_value=baseline), \
+                 patch.object(driver,'sealed_packages',return_value=[package]), \
+                 patch.object(driver.release,'seal_object',side_effect=seal), \
+                 patch.object(driver.release,'describe_preview',return_value=preview), \
+                 patch.object(driver,'source_selection',return_value={'sourceSha':source_sha}), \
+                 patch.object(driver,'identity_and_permissions',return_value=({'role':'exact'},{'allowed':True})), \
+                 redirect_stdout(io.StringIO()):
+                driver.review(session,args,{'sourceSha':source_sha},{'role':'exact'},{'allowed':True})
+            saved=json.loads(record.read_text())
+        self.assertEqual(saved['stackId'],stack)
+        self.assertEqual(len(saved['changes']),9)
+        self.assertEqual(cf.update_termination_protection.call_count,1)
+        self.assertEqual(cf.create_change_set.call_count,1)
     def test_final_authority_recaptures_environment_after_package_reads(self):
         from unittest.mock import Mock,patch
         from tools import run_thn_production_release as driver
@@ -183,7 +245,7 @@ class EffectivePermissionDriverTests(unittest.TestCase):
             fresh_identity=identity if field!='identity' else {'role':'changed'}
             fresh_permissions=permissions if field!='permissions' else {'denied':True}
             fresh_source=source if field!='source' else {'sourceSha':'b'*40}
-            with patch.object(driver,'source_selection',return_value=fresh_source),patch.object(driver,'captured_baseline',return_value=fresh_baseline),patch.object(driver,'identity_and_permissions',return_value=(fresh_identity,fresh_permissions)):
+            with patch.object(driver,'source_selection',return_value=fresh_source),patch.object(driver,'captured_baseline',return_value=fresh_baseline),patch.object(driver,'identity_and_permissions',return_value=(fresh_identity,fresh_permissions)),patch.object(driver.release,'validate_dedicated_api_native'):
                 if field=='none':driver.fresh_execute_authority(session,record,source,'state',preview,{'Resources':{}})
                 else:
                     with self.assertRaises(ReleaseError):driver.fresh_execute_authority(session,record,source,'state',preview,{'Resources':{}})
