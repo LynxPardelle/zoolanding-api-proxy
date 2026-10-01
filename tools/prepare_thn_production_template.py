@@ -28,6 +28,9 @@ def prepare_template(source):
     if props.get('AutoPublishAlias')!='test' or props.get('Handler')!='thn_auth_runtime_v2.lambda_handler' or set(props.get('Events',{}))!={'RuntimeGet','RuntimePost'}:
         raise ValueError('production_function_source_invalid')
     props['AutoPublishAlias']='production'
+    props['FunctionName']='zlp-thn-auth-runtime-production'
+    props['Role']='arn:aws:iam::765932874577:role/zlp-thn-auth-runtime-prod-role'
+    props.pop('Policies',None)
     props['Environment']['Variables']['THN_DEPLOYMENT_ENVIRONMENT']='production'
     result['Description']='Dedicated production The Hair Narrative auth runtime discovery.'
     result['Metadata']={'ThnProductionLifecycle':{'Profile':'production','StackName':'zoolanding-thn-auth-runtime-production','AutomaticActivation':False,'Prerequisites':'production registry and Cognito identifiers verified before review'}}

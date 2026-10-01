@@ -38,6 +38,53 @@ class ReleaseError(ValueError):
 def require(condition, message='production_release_invalid'):
     if not condition: raise ReleaseError(message)
 
+def validate_dedicated_api_native(template,changes=None,*,create=False):
+    """Fence the standalone API's translated resource set and external role."""
+    resources=template.get('Resources',{}) if isinstance(template,dict) else {}
+    fixed={
+        'ThnAuthRuntimeV2Function':'AWS::Lambda::Function',
+        'ThnAuthRuntimeV2FunctionAliasproduction':'AWS::Lambda::Alias',
+        'ThnAuthRuntimeV2FunctionRuntimeGetPermissionProd':'AWS::Lambda::Permission',
+        'ThnAuthRuntimeV2FunctionRuntimePostPermissionProd':'AWS::Lambda::Permission',
+        'ThnRuntimeApi':'AWS::ApiGateway::RestApi',
+        'ThnRuntimeApiProdStage':'AWS::ApiGateway::Stage',
+        'ThnRuntimeLogGroup':'AWS::Logs::LogGroup',
+    }
+    versions=[name for name in resources if re.fullmatch(r'ThnAuthRuntimeV2FunctionVersion[a-f0-9]{10}',name)]
+    deployments=[name for name in resources if re.fullmatch(r'ThnRuntimeApiDeployment[a-f0-9]{10}',name)]
+    require(len(versions)==len(deployments)==1 and len(resources)==9 and
+            all(resources.get(name,{}).get('Type')==kind for name,kind in fixed.items()) and
+            resources[versions[0]].get('Type')=='AWS::Lambda::Version' and
+            resources[deployments[0]].get('Type')=='AWS::ApiGateway::Deployment',
+            'production_dedicated_native_invalid')
+    props=resources['ThnAuthRuntimeV2Function'].get('Properties',{})
+    alias=resources['ThnAuthRuntimeV2FunctionAliasproduction'].get('Properties',{})
+    log=resources['ThnRuntimeLogGroup']
+    api=resources['ThnRuntimeApi'].get('Properties',{})
+    require(props.get('FunctionName')=='zlp-thn-auth-runtime-production' and
+            props.get('Role')=='arn:aws:iam::765932874577:role/zlp-thn-auth-runtime-prod-role' and
+            alias.get('Name')=='production' and
+            alias.get('FunctionName')=={'Ref':'ThnAuthRuntimeV2Function'} and
+            log.get('DeletionPolicy')=='Retain' and log.get('UpdateReplacePolicy')=='Retain' and
+            log.get('Properties',{}).get('LogGroupName')=={'Fn::Sub':'/aws/lambda/${ThnAuthRuntimeV2Function}'} and
+            set(api.get('Body',{}).get('paths',{}))=={'/auth-v2/runtime-config'} and
+            set(api['Body']['paths']['/auth-v2/runtime-config'])=={'get','post'},
+            'production_dedicated_native_invalid')
+    if changes is not None:
+        require(isinstance(changes,list) and (not create or len(changes)==len(resources)),
+                'production_dedicated_native_inventory_invalid')
+        seen=set()
+        for item in changes:
+            row=item.get('ResourceChange',{}) if isinstance(item,dict) else {}
+            logical=row.get('LogicalResourceId')
+            require(item.get('Type')=='Resource' and logical in resources and logical not in seen and
+                    row.get('ResourceType')==resources[logical]['Type'] and
+                    row.get('Action') in ({'Add'} if create else {'Add','Modify'}) and
+                    row.get('Replacement') in (None,'False'),
+                    'production_dedicated_native_inventory_invalid')
+            seen.add(logical)
+    return resources
+
 def canonical(value):
     return json.dumps(value,sort_keys=True,separators=(',',':'),default=str).encode()
 

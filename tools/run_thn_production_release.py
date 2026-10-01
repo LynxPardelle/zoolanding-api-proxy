@@ -340,6 +340,8 @@ def review(session,args,source,identity,permissions):
     preview=release.describe_preview(cf,arn)
     original=release.parse_template(cf.get_template(ChangeSetName=arn,TemplateStage='Original')['TemplateBody'])
     processed=release.parse_template(cf.get_template(ChangeSetName=arn,TemplateStage='Processed')['TemplateBody'])
+    if CONFIG['service']=='api' and args.scope=='private':
+        release.validate_dedicated_api_native(processed,preview['Changes'],create=baseline.get('absent',False))
     release.review_inventory(preview['Changes'],release.parse_template(baseline['processed']),processed,scope=args.purpose)
     # Native provider handler schemas supply their actual required actions.
     # A guessed action list is insufficient even when caller simulation passes.
@@ -356,6 +358,8 @@ def review(session,args,source,identity,permissions):
 def fresh_execute_authority(session,record,source,purpose,preview,processed):
     release.require(source_selection(source['sourceSha'])==source,'production_source_changed_before_execute')
     baseline=captured_baseline(session)
+    if CONFIG['service']=='api' and CONFIG['stack']=='zoolanding-thn-auth-runtime-production':
+        release.validate_dedicated_api_native(processed,preview['Changes'],create=baseline.get('absent',False))
     release.require(release.sha(baseline)==record['baselineSha256'],'production_baseline_changed_before_execute')
     identity,permissions=identity_and_permissions(session,source,purpose,preview['Changes'],processed,
         release.parse_template(baseline['processed']))
