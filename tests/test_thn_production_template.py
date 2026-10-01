@@ -8,6 +8,9 @@ class ProductionTemplateTests(unittest.TestCase):
         source=yaml.safe_load((ROOT/'template-thn-runtime-test.yaml').read_text());result=prepare_template(source)
         props=result['Resources']['ThnAuthRuntimeV2Function']['Properties']
         self.assertEqual(props['AutoPublishAlias'],'production')
+        self.assertEqual(props['FunctionName'],'zlp-thn-auth-runtime-production')
+        self.assertEqual(props['Role'],'arn:aws:iam::765932874577:role/zlp-thn-auth-runtime-prod-role')
+        self.assertNotIn('Policies',props)
         self.assertEqual(props['Environment']['Variables']['THN_DEPLOYMENT_ENVIRONMENT'],'production')
         self.assertEqual(props['Environment']['Variables']['SERVICE_BINDING_REGISTRY_V2_TABLE_NAME'],'zoolanding-content-hub-prod-ServiceBindingRegistryV2')
         self.assertEqual(set(props['Events']),{'RuntimeGet','RuntimePost'})
@@ -32,6 +35,14 @@ class ProductionTemplateTests(unittest.TestCase):
         self.assertNotIn('Transform',native)
         self.assertEqual(set(native['Resources']['ThnRuntimeApi']['Properties']['Body']['paths']),{'/auth-v2/runtime-config'})
         self.assertIn('ThnAuthRuntimeV2FunctionAliasproduction',native['Resources'])
+        self.assertNotIn('ThnAuthRuntimeV2FunctionRole',native['Resources'])
+        self.assertEqual(native['Resources']['ThnAuthRuntimeV2Function']['Properties']['FunctionName'],'zlp-thn-auth-runtime-production')
+        from tools import thn_production_release as release
+        self.assertTrue(callable(getattr(release,'validate_dedicated_api_native',None)))
+        release.validate_dedicated_api_native(native)
+        unexpected=__import__('copy').deepcopy(native)
+        unexpected['Resources']['ThnAuthRuntimeV2FunctionRole']={'Type':'AWS::IAM::Role'}
+        with self.assertRaises(release.ReleaseError):release.validate_dedicated_api_native(unexpected)
     def test_general_projection_preserves_all_legacy_routes_and_build_targets(self):
         from tools.prepare_thn_production_template import prepare_general_template
         import copy
