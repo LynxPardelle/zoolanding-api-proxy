@@ -47,18 +47,26 @@ class ProductionPrerequisiteTests(unittest.TestCase):
                    'registrySha256':release.sha(row)}
 
         class Cognito:
+            requests=0
             def describe_user_pool(self,**kwargs):
                 return {'UserPool':{'Name':'zoolanding-auth-admin-prod-ThnAuthAdminV2',
                                     'MfaConfiguration':'ON','DeletionProtection':'ACTIVE',
                                     'AdminCreateUserConfig':{'AllowAdminCreateUserOnly':True}}}
             def get_user_pool_mfa_config(self,**kwargs):
-                return {'MfaConfiguration':'ON','SoftwareTokenMfaConfiguration':{'Enabled':True}}
+                self.requests+=1
+                return {'MfaConfiguration':'ON','SoftwareTokenMfaConfiguration':{'Enabled':True},
+                        'ResponseMetadata':{'RequestId':f'request-{self.requests}'}}
         class Dynamo:
             def get_item(self,**kwargs):
                 return {'Item':serialized}
         class Session:
+            def __init__(self):
+                self.cognito=Cognito()
             def client(self,name):
-                return {'cloudformation':object(),'cognito-idp':Cognito(),'dynamodb':Dynamo()}[name]
+                return {'cloudformation':object(),'cognito-idp':self.cognito,'dynamodb':Dynamo()}[name]
+        session=Session()
         with patch('tools.thn_production_prerequisites.release.snapshot',side_effect=lambda cf,name:baselines[name]):
-            actual=capture(Session(),selection,'api','a'*40)
+            actual=capture(session,selection,'api','a'*40)
+            repeated=capture(session,selection,'api','a'*40)
         self.assertEqual(actual['registrySha256'],selection['registrySha256'])
+        self.assertEqual(actual['mfaConfigurationSha256'],repeated['mfaConfigurationSha256'])
