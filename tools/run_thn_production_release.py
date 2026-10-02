@@ -91,6 +91,12 @@ CALLER_ACTIONS=frozenset({'cloudformation:CreateChangeSet','cloudformation:Descr
     's3:GetBucketPublicAccessBlock','s3:AbortMultipartUpload','s3:ListMultipartUploadParts','s3:PutObject','s3:GetObject','s3:GetObjectVersion',
     'lambda:GetFunction','lambda:GetFunctionConfiguration'})
 
+API_TAG_ACTIONS=['apigateway:GET','apigateway:PUT','apigateway:DELETE']
+API_TAG_RESOURCE=(f'arn:aws:apigateway:{release.REGION}::/tags/'
+    f'arn%3Aaws%3Aapigateway%3A{release.REGION}%3A%3A%2Frestapis%2F*')
+API_TAG_CONTEXT=[{'ContextKeyName':'aws:RequestedRegion',
+    'ContextKeyValues':[release.REGION],'ContextKeyType':'string'}]
+
 def identity_and_permissions(session,source,purpose,native_changes=None,native_template=None,previous=None):
     release.require(session.region_name==release.REGION)
     identity=session.client('sts').get_caller_identity()
@@ -113,7 +119,12 @@ def identity_and_permissions(session,source,purpose,native_changes=None,native_t
     if purpose=='activate':release.require({'cognito-idp:DescribeUserPool','cognito-idp:GetUserPoolMfaConfig','dynamodb:GetItem'}<=set().union(*(set(r.get('actions',[])) for r in plan['requests'] if r.get('principalArn')==role['Arn'])),'production_verified_metadata_permissions_missing')
     caller_actions=set().union(*(set(r.get('actions',[])) for r in plan['requests'] if r.get('principalArn')==role['Arn']))
     release.require(CALLER_ACTIONS<=caller_actions,'production_caller_permission_coverage_incomplete')
-    schemas=[];required_execution=set()
+    # The dedicated private API creates its REST API during activation. Require
+    # its separate tag-path grant before the review uploads or creates anything;
+    # the native provider schema is checked again against the actual change set.
+    schemas=[];required_execution=set();api_tag_on_create=(
+        CONFIG['service']=='api' and CONFIG.get('generalStack')!=CONFIG['stack']
+        and purpose=='activate')
     from tools.thn_production_native_permissions import selected_actions
     by_type={}
     for item in native_changes or []:
@@ -124,9 +135,22 @@ def identity_and_permissions(session,source,purpose,native_changes=None,native_t
         permissions=selected_actions(kind,schema['handlers'],by_type[kind],native_template,previous)
         release.require(permissions,'production_native_handler_permissions_unavailable')
         required_execution.update(permissions)
+        if kind in {'AWS::ApiGateway::RestApi','AWS::ApiGateway::Stage'} and any(
+                change['Action']=='Add' for change in by_type[kind]):
+            tagging=schema.get('tagging',{})
+            release.require(tagging.get('taggable') is True and tagging.get('tagOnCreate') is True
+                and set(API_TAG_ACTIONS)<=set(tagging.get('permissions',[])),
+                'production_api_tag_schema_invalid')
+            api_tag_on_create=True
         schemas.append({'resourceType':kind,'schemaSha256':release.sha(schema),'handlerPermissions':sorted(permissions)})
     execution_actions=set().union(*(set(r.get('actions',[])) for r in plan['requests'] if r.get('principalArn')==execution['Arn']))
     release.require(required_execution<=execution_actions and execution_actions,'production_execution_permission_coverage_incomplete')
+    if api_tag_on_create:
+        tag_requests=[r for r in plan['requests'] if r.get('principalArn')==execution['Arn']
+            and any('/tags/' in resource for resource in r.get('resources',[]))]
+        release.require(tag_requests==[{'principalArn':execution['Arn'],'actions':API_TAG_ACTIONS,
+            'resources':[API_TAG_RESOURCE],'context':API_TAG_CONTEXT}],
+            'production_api_tag_permission_coverage_incomplete')
     proofs=[]
     allowed={role['Arn'],execution['Arn']}
     for request in plan['requests']:
