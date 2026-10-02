@@ -45,6 +45,7 @@ def capture(session,selection,service,source_sha):
     release.require(config.get('Name')=='zoolanding-auth-admin-prod-ThnAuthAdminV2' and config.get('MfaConfiguration')=='ON' and config.get('DeletionProtection')=='ACTIVE' and config.get('AdminCreateUserConfig',{}).get('AllowAdminCreateUserOnly') is True)
     mfa=client.get_user_pool_mfa_config(UserPoolId=pool)
     release.require(mfa.get('MfaConfiguration')=='ON' and mfa.get('SoftwareTokenMfaConfiguration',{}).get('Enabled') is True)
+    mfa.pop('ResponseMetadata',None)
     from boto3.dynamodb.types import TypeDeserializer
     table=native['zoolanding-content-hub-prod']['ServiceBindingRegistryV2Table']['PhysicalResourceId']
     release.require(table=='zoolanding-content-hub-prod-ServiceBindingRegistryV2')
